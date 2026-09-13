@@ -1,17 +1,20 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
+const pool = require('./db');
+
+const authRoutes = require('./routes/auth');
+const usuariosRoutes = require('./routes/usuarios');
 
 const app = express();
-app.use(cors());
+
+// CORS: solo permite peticiones desde el frontend configurado
+app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json());
 
-// Conexión a la base de datos (Neon requiere SSL)
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+// Rutas de la API
+app.use('/api/auth', authRoutes);
+app.use('/api/usuarios', usuariosRoutes);
 
 // Ruta de prueba: confirma que el servidor está vivo
 app.get('/', (req, res) => {
