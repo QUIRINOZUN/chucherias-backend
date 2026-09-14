@@ -8,8 +8,28 @@ const usuariosRoutes = require('./routes/usuarios');
 
 const app = express();
 
-// CORS: solo permite peticiones desde el frontend configurado
-app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
+// CORS: permite una LISTA de orígenes (desarrollo local + producción en Vercel),
+// en vez de uno solo. Se definen separados por coma en la variable de entorno CORS_ORIGIN.
+// Ejemplo de valor en Render: http://localhost:4200,https://chucherias-frontend.vercel.app
+const origenesPermitidos = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((origen) => origen.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Permite peticiones sin "origin" (como Postman o curl) y las que sí
+      // vengan en la lista de orígenes permitidos.
+      if (!origin || origenesPermitidos.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`Origen no permitido por CORS: ${origin}`));
+      }
+    },
+  })
+);
+
 app.use(express.json());
 
 // Rutas de la API
@@ -35,4 +55,5 @@ app.get('/api/ping-db', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en el puerto ${PORT}`);
+  console.log(`Orígenes permitidos (CORS): ${origenesPermitidos.join(', ') || '(ninguno configurado)'}`);
 });
