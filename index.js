@@ -5,12 +5,13 @@ const pool = require('./db');
 
 const authRoutes = require('./routes/auth');
 const usuariosRoutes = require('./routes/usuarios');
+const catalogoRoutes = require('./routes/catalogo');
+const ventasRoutes = require('./routes/ventas');
+const cajaRoutes = require('./routes/caja');
 
 const app = express();
 
-// CORS: permite una LISTA de orígenes (desarrollo local + producción en Vercel),
-// en vez de uno solo. Se definen separados por coma en la variable de entorno CORS_ORIGIN.
-// Ejemplo de valor en Render: http://localhost:4200,https://chucherias-frontend.vercel.app
+// CORS: permite una lista de orígenes (desarrollo local + producción en Vercel)
 const origenesPermitidos = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map((origen) => origen.trim())
@@ -19,8 +20,6 @@ const origenesPermitidos = (process.env.CORS_ORIGIN || '')
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Permite peticiones sin "origin" (como Postman o curl) y las que sí
-      // vengan en la lista de orígenes permitidos.
       if (!origin || origenesPermitidos.includes(origin)) {
         callback(null, true);
       } else {
@@ -35,6 +34,9 @@ app.use(express.json());
 // Rutas de la API
 app.use('/api/auth', authRoutes);
 app.use('/api/usuarios', usuariosRoutes);
+app.use('/api', catalogoRoutes); // expone /api/categorias y /api/productos
+app.use('/api/ventas', ventasRoutes);
+app.use('/api/caja', cajaRoutes);
 
 // Ruta de prueba: confirma que el servidor está vivo
 app.get('/', (req, res) => {
