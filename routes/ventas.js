@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
+const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
 
@@ -19,12 +20,16 @@ function generarNumeroOrden() {
 // siempre se leen de variantes_producto en el servidor.
 router.post('/', async (req, res) => {
   const { items, metodo_pago, cliente_id } = req.body;
+  const tipo_entrega = req.body.tipo_entrega || 'presencial';
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'La venta debe incluir al menos un producto.' });
   }
   if (!['efectivo', 'transferencia'].includes(metodo_pago)) {
     return res.status(400).json({ error: 'El método de pago debe ser efectivo o transferencia.' });
+  }
+  if (!['presencial', 'domicilio'].includes(tipo_entrega)) {
+    return res.status(400).json({ error: 'El tipo de entrega debe ser presencial o domicilio.' });
   }
 
   const varianteIds = items.map((item) => item.variante_id);
@@ -55,9 +60,9 @@ router.post('/', async (req, res) => {
 
     const orden = await client.query(
       `INSERT INTO ordenes (numero_orden, cliente_id, tipo_entrega, estado, creado_por)
-       VALUES ($1, $2, 'presencial', 'entregado', $3)
+       VALUES ($1, $2, $3, 'entregado', $4)
        RETURNING *`,
-      [generarNumeroOrden(), cliente_id || null, req.usuario.id]
+      [generarNumeroOrden(), cliente_id || null, tipo_entrega, req.usuario.id]
     );
 
     let subtotal = 0;
@@ -103,21 +108,60 @@ router.post('/', async (req, res) => {
 });
 
 // GET /api/ventas?fecha=YYYY-MM-DD
-// Lista las ventas del día (o de la fecha indicada), más recientes primero.
-router.get('/', async (req, res) => {
-  const fecha = req.query.fecha || new Date().toISOString().slice(0, 10);
+// Lista las ventas del día (o de la fecha indicada) con sus productos,
+// más recientes primero. Es información financiera: solo administrador y
+// encargado (RNF-03), igual que /api/caja/cortes.
+router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
+  const fecha = req.query.fecha || fechaHoyNegocio();
+
+  if (!fechaValida(fecha)) {
+    return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+  }
 
   try {
-    const resultado = await pool.query(
-      `SELECT v.*, o.numero_orden, u.nombre AS cajero
+    const ventas = await pool.query(
+      `SELECT v.*, o.id AS orden_id, o.numero_orden, o.tipo_entrega, u.nombre AS cajero
        FROM ventas v
        JOIN ordenes o ON o.id = v.orden_id
        JOIN usuarios u ON u.id = v.cajero_id
-       WHERE v.fecha::date = $1
+       WHERE ${diaNegocioSql('v.fecha')} = $1
        ORDER BY v.fecha DESC`,
       [fecha]
     );
-    res.json(resultado.rows);
+
+    if (ventas.rows.length === 0) {
+      return res.json([]);
+    }
+
+    const ordenIds = ventas.rows.map((v) => v.orden_id);
+    const detalle = await pool.query(
+      `SELECT od.orden_id, od.cantidad, od.notas, vp.nombre AS variante_nombre, p.nombre AS producto_nombre
+       FROM orden_detalle od
+       JOIN variantes_producto vp ON vp.id = od.variante_id
+       JOIN productos p ON p.id = vp.producto_id
+       WHERE od.orden_id = ANY($1::int[])`,
+      [ordenIds]
+    );
+
+    const detallePorOrden = {};
+    for (const fila of detalle.rows) {
+      if (!detallePorOrden[fila.orden_id]) {
+        detallePorOrden[fila.orden_id] = [];
+      }
+      detallePorOrden[fila.orden_id].push({
+        producto: fila.producto_nombre,
+        variante: fila.variante_nombre,
+        cantidad: fila.cantidad,
+        notas: fila.notas,
+      });
+    }
+
+    const resultado = ventas.rows.map((venta) => ({
+      ...venta,
+      items: detallePorOrden[venta.orden_id] || [],
+    }));
+
+    res.json(resultado);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener las ventas.' });
