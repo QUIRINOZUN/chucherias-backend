@@ -18,7 +18,7 @@ function generarNumeroOrden() {
 // Registra una venta del punto de venta en una sola transacción:
 // orden + orden_detalle + venta. Los precios NUNCA se toman del cliente,
 // siempre se leen de variantes_producto en el servidor.
-router.post('/', async (req, res) => {
+router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req, res) => {
   const { items, metodo_pago, cliente_id } = req.body;
   const tipo_entrega = req.body.tipo_entrega || 'presencial';
 
@@ -120,10 +120,12 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
 
   try {
     const ventas = await pool.query(
-      `SELECT v.*, o.id AS orden_id, o.numero_orden, o.tipo_entrega, u.nombre AS cajero
+      `SELECT v.*, o.id AS orden_id, o.numero_orden, o.tipo_entrega, u.nombre AS cajero,
+              uc.nombre AS cancelado_por_nombre
        FROM ventas v
        JOIN ordenes o ON o.id = v.orden_id
        JOIN usuarios u ON u.id = v.cajero_id
+       LEFT JOIN usuarios uc ON uc.id = v.cancelado_por
        WHERE ${diaNegocioSql('v.fecha')} = $1
        ORDER BY v.fecha DESC`,
       [fecha]
@@ -181,7 +183,7 @@ router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (
 
     const venta = await client.query(
       `UPDATE ventas
-       SET estado = 'cancelada', cancelado_por = $1, motivo_cancelacion = $2
+       SET estado = 'cancelada', cancelado_por = $1, motivo_cancelacion = $2, fecha_cancelacion = NOW()
        WHERE id = $3 AND estado = 'completada'
        RETURNING *`,
       [req.usuario.id, motivo || null, id]

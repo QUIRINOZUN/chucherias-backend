@@ -28,7 +28,7 @@ async function totalesDelDia(fecha) {
 // Calcula, en tiempo real, cuánto debería haber en caja según el sistema
 // (RF-04), sin guardar nada todavía. Sirve para que el cajero compare
 // contra lo que cuenta físicamente antes de cerrar el turno.
-router.get('/resumen', async (req, res) => {
+router.get('/resumen', requiereRol('administrador', 'encargado', 'cajero'), async (req, res) => {
   const fecha = req.query.fecha || fechaHoyNegocio();
 
   if (!fechaValida(fecha)) {
