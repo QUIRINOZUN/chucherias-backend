@@ -10,6 +10,9 @@ CREATE TABLE roles (
     nombre      VARCHAR(30) NOT NULL UNIQUE  -- administrador, encargado, cajero, auxiliar
 );
 
+-- Cuentas de acceso al sistema. Nunca se borran: se desactivan (activo = FALSE)
+-- para conservar el historial de ventas/cortes de cada persona.
+-- contrasena_hash guarda SOLO el hash bcrypt, jamás la contraseña.
 CREATE TABLE usuarios (
     id                 SERIAL PRIMARY KEY,
     nombre             VARCHAR(100) NOT NULL,
@@ -59,6 +62,9 @@ CREATE TABLE productos (
 CREATE TABLE variantes_producto (
     id           SERIAL PRIMARY KEY,
     producto_id  INTEGER NOT NULL REFERENCES productos(id),
+    -- Presentación que se vende (tamaño o paquete). ESTA es la unidad que se
+    -- agrega al carrito y la ÚNICA fuente de precios: el servidor siempre lee
+    -- el precio de aquí, nunca del cliente.
     nombre       VARCHAR(80) NOT NULL,      -- ej. "12 oz", "Paquete 12 piezas", "Único"
     precio       NUMERIC(10,2) NOT NULL
 );
@@ -115,18 +121,25 @@ CREATE TABLE clientes (
 
 -- ===================== ÓRDENES Y VENTAS =====================
 
+-- Una orden = un pedido. Se crea junto con su venta (routes/ventas.js) y su
+-- estado es lo que la cocina ve en el tablero de comandas (Sprint 2).
+-- Flujo: sin_preparar -> preparando -> por_entregar -> entregado.
+-- 'cancelada' se asigna al cancelar la venta y ya no avanza.
 CREATE TABLE ordenes (
     id             SERIAL PRIMARY KEY,
     numero_orden   VARCHAR(20) NOT NULL UNIQUE,
     cliente_id     INTEGER REFERENCES clientes(id),
     tipo_entrega   VARCHAR(20) NOT NULL CHECK (tipo_entrega IN ('presencial','domicilio')),
     estado         VARCHAR(20) NOT NULL DEFAULT 'sin_preparar'
-                   CHECK (estado IN ('sin_preparar','preparando','preparado','entregado','cancelada')),
+                   CHECK (estado IN ('sin_preparar','preparando','por_entregar','entregado','cancelada')),
     fecha_creacion TIMESTAMP NOT NULL DEFAULT NOW(),
     creado_por     INTEGER NOT NULL REFERENCES usuarios(id),
     repartidor_id  INTEGER REFERENCES empleados(id)
 );
 
+-- Renglones de una orden: qué variante, cuántas y a qué precio. precio_unitario
+-- se "congela" al vender, así los cambios de menú no alteran ventas pasadas.
+-- notas guarda la personalización ("Sin: tocino · sin picante").
 CREATE TABLE orden_detalle (
     id               SERIAL PRIMARY KEY,
     orden_id         INTEGER NOT NULL REFERENCES ordenes(id),
@@ -136,6 +149,12 @@ CREATE TABLE orden_detalle (
     notas            VARCHAR(255)   -- extras, ingredientes a quitar, etc.
 );
 
+-- El cobro de una orden (relación 1 a 1 con ordenes). Guarda quién cobró
+-- (cajero_id) y, si se cancela, quién (cancelado_por), cuándo
+-- (fecha_cancelacion) y por qué (motivo_cancelacion) — RF-03.
+-- Solo las ventas 'completada' cuentan para el corte de caja.
+-- `fecha` está en UTC; el "día del negocio" se calcula en hora de Durango
+-- (ver utils/fecha.js).
 CREATE TABLE ventas (
     id                   SERIAL PRIMARY KEY,
     orden_id             INTEGER NOT NULL UNIQUE REFERENCES ordenes(id),
@@ -148,7 +167,8 @@ CREATE TABLE ventas (
                          CHECK (estado IN ('completada','cancelada')),
     cajero_id            INTEGER NOT NULL REFERENCES usuarios(id),
     cancelado_por        INTEGER REFERENCES usuarios(id),
-    motivo_cancelacion   VARCHAR(255)
+    motivo_cancelacion   VARCHAR(255),
+    fecha_cancelacion    TIMESTAMP
 );
 
 CREATE TABLE lealtad_historial (
@@ -173,6 +193,10 @@ CREATE TABLE mermas (
     CHECK (variante_id IS NOT NULL OR insumo_id IS NOT NULL)
 );
 
+-- Corte de caja (RF-04). total_efectivo y total_transferencia son lo CONTADO
+-- físicamente por el responsable; total_sistema es lo que el servidor calculó
+-- de las ventas; diferencia = contado - sistema (positiva sobra, negativa falta).
+-- Puede haber más de un corte por día (turnos).
 CREATE TABLE cortes_caja (
     id                   SERIAL PRIMARY KEY,
     fecha                DATE NOT NULL,

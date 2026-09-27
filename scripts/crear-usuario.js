@@ -14,7 +14,11 @@ require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
 
+// Flujo: leer argumentos → validar → buscar el rol → verificar que el usuario
+// no exista → cifrar la contraseña → insertar la cuenta (activa).
 async function crearUsuario() {
+  // process.argv[0] y [1] son node y la ruta del script; los argumentos reales
+  // empiezan en la posición 2.
   const [nombre, usuario, contrasena, rolNombre] = process.argv.slice(2);
 
   if (!nombre || !usuario || !contrasena || !rolNombre) {
@@ -41,6 +45,7 @@ async function crearUsuario() {
       process.exit(1);
     }
 
+    // La contraseña nunca se guarda en claro: solo su hash bcrypt (10 rondas).
     const contrasenaHash = await bcrypt.hash(contrasena, 10);
 
     const resultado = await pool.query(
@@ -59,4 +64,5 @@ async function crearUsuario() {
   }
 }
 
+// Ejecuta el script al ser invocado con `node scripts/crear-usuario.js ...`.
 crearUsuario();

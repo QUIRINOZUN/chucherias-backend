@@ -8,6 +8,15 @@
 // servidor — no encaja en el modelo actual hasta que exista precio por peso.
 //
 // Uso: node scripts/seed-catalogo.js
+//
+// ADVERTENCIA: escribe en la base de datos REAL (Neon). Corre todo dentro de
+// una transacción: si algo falla, no queda nada a medias.
+//
+// ESTRUCTURA DE ESTE ARCHIVO
+//   1. Listas de categorías (sin cambio / renombradas / nuevas).
+//   2. PRODUCTOS: el menú completo como datos (categoría, nombre, descripción
+//      y las variantes con su precio).
+//   3. seed(): la función que aplica esos datos a la base, en 5 pasos.
 
 require('dotenv').config();
 const pool = require('../db');
@@ -38,7 +47,12 @@ const SALSAS_ALITAS_BONELESS =
 const TOPPINGS_CREPAS =
   'Toppings disponibles: cajeta, lechera, Hershey\'s, mapple, coco, almendra, chispas de chocolate, fresa, plátano, cereza, durazno, nuez, mermelada de zarzamora, mermelada de fresa, mermelada de piña, Nutella, Philadelphia, azúcar glass, galleta Oreo, mazapán, chispas de colores, lunetas.';
 
-// { categoria, nombre, descripcion, variantes: [{nombre, precio}] }
+// El menú real como datos. Cada entrada es un producto:
+//   { categoria, nombre, descripcion, variantes: [{ nombre, precio }] }
+// Lo que el cliente compra es una VARIANTE (tamaño/paquete) y cada una lleva su
+// precio; productos con una sola presentación usan la variante "Único".
+// Para cambiar un precio o agregar un producto, se edita aquí y se vuelve a
+// correr el script (no duplica lo que ya existe).
 const PRODUCTOS = [
   // ---- Hamburguesas ----
   {
@@ -499,12 +513,18 @@ const PRODUCTOS = [
   },
 ];
 
+// Aplica el catálogo a la base de datos. Todo ocurre en UNA transacción
+// (BEGIN ... COMMIT): ante cualquier error se hace ROLLBACK y la base queda
+// exactamente como estaba antes de correr el script.
 async function seed() {
+  // Conexión exclusiva del pool: necesaria para poder usar transacciones.
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
+    // `idsCategorias` recuerda el id de cada categoría por nombre para usarlo
+    // al insertar los productos en el paso 5.
     // 1. Categorías sin cambio: aseguran que existan (ya deberían).
     const idsCategorias = {};
     for (const nombre of CATEGORIAS_SIN_CAMBIO) {
@@ -568,6 +588,8 @@ async function seed() {
         continue;
       }
 
+      // `precio_base` de productos es solo referencia (la primera variante);
+      // el precio que se cobra siempre sale de variantes_producto.
       const precioBase = producto.variantes[0].precio;
       const resultadoProducto = await client.query(
         `INSERT INTO productos (categoria_id, nombre, descripcion, precio_base, activo)
