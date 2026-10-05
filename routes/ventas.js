@@ -4,7 +4,8 @@
 // Endpoints (prefijo /api/ventas), todos exigen sesión:
 //   POST  /                → registrar una venta (administrador, encargado, cajero)
 //   GET   /?fecha=…        → ventas de un día del negocio      (administrador, encargado)
-//   PATCH /:id/cancelar    → cancelar una venta (RF-03)        (administrador, encargado)
+//   PATCH /:id/cancelar    → cancelar una venta, total o PARCIAL (RF-03)
+//                            (administrador, encargado)
 //
 // CONCEPTOS CLAVE
 //   Una venta se guarda en TRES tablas que siempre se escriben juntas:
@@ -17,11 +18,52 @@
 //   REGLA DE ORO: el precio NUNCA viene del cliente. El frontend solo manda
 //   qué variante se vendió y cuántas; el precio se lee de variantes_producto
 //   en el servidor. Así nadie puede alterar un precio desde el navegador.
+//
+// CANCELACIÓN (PARCIAL o total) — decisión de negocio del 2026-10-03:
+//   Cancelar una venta ya NO es todo-o-nada: se puede elegir cuáles
+//   productos (orden_detalle) se cancelan. `ventas.total` NUNCA se modifica
+//   después de registrada (es el histórico de lo que se cobró); lo que se
+//   ajusta es `ventas.estado` (solo pasa a 'cancelada' si TODOS sus
+//   productos quedan cancelados) y se registra un REEMBOLSO (ver abajo).
+//
+//   Por cada producto cancelado, sin importar el estado de la comanda, se
+//   registra una MERMA (tabla `mermas`, a nivel producto — "esto ya no se
+//   puede volver a vender"). Qué pasa con los INSUMOS de ese producto
+//   depende del estado que tenía la comanda al cancelarse:
+//     - 'sin_preparar'  → nunca se descontó nada, no hay nada que rescatar
+//                         ni que perder (ver RF-11 más abajo).
+//     - 'preparando'    → YA se había descontado. Quien cancela elige, por
+//                         insumo, cuáles se RESCATAN (vuelven al inventario)
+//                         y cuáles ya son MERMA de insumo (se usaron en la
+//                         preparación y no se pueden recuperar) — viene en
+//                         `insumos_rescatados` del body.
+//     - 'por_entregar' / 'entregado' → el producto ya está armado o listo:
+//                         NINGÚN insumo se rescata, todo queda como ya
+//                         consumido (no se revierte nada).
+//
+//   REEMBOLSO: si cancelar implica que el cliente ya pagó por algo que no
+//   se le va a entregar, se registra un movimiento de caja tipo 'reembolso'
+//   (mismo mecanismo que 'retiro': resta del efectivo esperado — ver
+//   routes/caja.js) por la suma de los productos cancelados EN ESTA
+//   operación, ligado a la orden (`movimientos_caja.orden_id`).
+//
+//   RF-11 (restitución de inventario): si la comanda ya había pasado por
+//   'preparando' (y por lo tanto routes/ordenes.js ya descontó sus
+//   insumos), cancelar restituye SOLO los insumos marcados como "rescatados"
+//   (ver arriba) — antes de este ajuste se restituía siempre el 100%. La
+//   merma (financiera, a nivel producto) y la restitución (ajuste del
+//   ledger de insumos) conviven a propósito: una no sustituye a la otra.
+//
+//   Fase 2 del recetario: cada item puede traer `insumos_quitados` (nombres
+//   de insumo, no solo texto) — se guardan en `orden_detalle_insumos` para
+//   que el descuento automático de inventario (routes/ordenes.js, al pasar
+//   la comanda a 'preparando') sepa qué NO restar.
 // =============================================================================
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
+const { calcularInsumosDeLineas, registrarMovimientosInventario } = require('../utils/inventarioOrden');
 
 const router = express.Router();
 
@@ -104,6 +146,14 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
       [generarNumeroOrden(), cliente_id || null, tipo_entrega, req.usuario.id]
     );
 
+    // RF-08: abre el primer renglón de tiempo por estado ('sin_preparar'),
+    // que routes/ordenes.js irá cerrando y reabriendo en cada avance.
+    await client.query(
+      `INSERT INTO orden_estado_historial (orden_id, estado, fecha_inicio, responsable_id)
+       VALUES ($1, 'sin_preparar', NOW(), $2)`,
+      [orden.rows[0].id, req.usuario.id]
+    );
+
     // ---- 3) Detalle de la orden + cálculo del subtotal --------------------
     let subtotal = 0;
     for (const item of items) {
@@ -115,11 +165,46 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
       // El precio se guarda en el renglón ("congelado"): si el menú cambia de
       // precio mañana, esta venta conserva lo que realmente se cobró.
       // `notas` trae la personalización ("Sin: tocino · sin picante").
-      await client.query(
+      const detalle = await client.query(
         `INSERT INTO orden_detalle (orden_id, variante_id, cantidad, precio_unitario, notas)
-         VALUES ($1, $2, $3, $4, $5)`,
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id`,
         [orden.rows[0].id, item.variante_id, cantidad, precioUnitario, item.notas || null]
       );
+
+      // Fase 2 del recetario: ingredientes quitados, como insumo real (no
+      // solo texto), para que el descuento automático sepa qué NO restar al
+      // preparar esta línea (ver PATCH /api/ordenes/:id/estado). Un nombre
+      // que no coincida con ningún insumo se ignora en silencio: es mejor
+      // perder la exclusión de ESE ingrediente que tumbar la venta completa
+      // por un nombre mal escrito en el catálogo del POS.
+      for (const nombreInsumo of item.insumos_quitados || []) {
+        const insumo = await client.query('SELECT id FROM insumos WHERE nombre = $1', [nombreInsumo]);
+        if (insumo.rows.length === 0) {
+          continue;
+        }
+        await client.query(
+          `INSERT INTO orden_detalle_insumos (orden_detalle_id, insumo_id, tipo)
+           VALUES ($1, $2, 'quitado')`,
+          [detalle.rows[0].id, insumo.rows[0].id]
+        );
+      }
+
+      // Y los insumos ELEGIDOS (salsa/topping/dip): no están en la receta fija
+      // de la variante (esa línea se dejó fuera a propósito), así que aquí sí
+      // se guarda también la cantidad — es la única fuente de esa cantidad
+      // para cuando se descuente el inventario.
+      for (const elegido of item.insumos_elegidos || []) {
+        const insumo = await client.query('SELECT id FROM insumos WHERE nombre = $1', [elegido.insumo]);
+        if (insumo.rows.length === 0) {
+          continue;
+        }
+        await client.query(
+          `INSERT INTO orden_detalle_insumos (orden_detalle_id, insumo_id, tipo, cantidad, unidad_medida)
+           VALUES ($1, $2, 'elegido', $3, $4)`,
+          [detalle.rows[0].id, insumo.rows[0].id, elegido.cantidad, elegido.unidad_medida]
+        );
+      }
     }
 
     // ---- 4) El cobro -------------------------------------------------------
@@ -170,11 +255,28 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
   }
 
   try {
-    // Consulta 1: las ventas del día con datos de su orden, el cajero y —si
-    // fue cancelada— quién la canceló (LEFT JOIN: solo existe en canceladas).
+    // Consulta 1: las ventas del día con datos de su orden, el cajero, —si
+    // fue cancelada— quién la canceló (LEFT JOIN: solo existe en canceladas),
+    // y cuántas mermas (y cuántos pesos) generó esa cancelación (0 en una
+    // venta no cancelada).
     const ventas = await pool.query(
-      `SELECT v.*, o.id AS orden_id, o.numero_orden, o.tipo_entrega, u.nombre AS cajero,
-              uc.nombre AS cancelado_por_nombre
+      `SELECT v.*, o.id AS orden_id, o.numero_orden, o.tipo_entrega, o.estado AS estado_orden,
+              u.nombre AS cajero, uc.nombre AS cancelado_por_nombre,
+              (SELECT COUNT(*)::int FROM mermas m WHERE m.orden_id = o.id) AS mermas_generadas,
+              (SELECT COALESCE(SUM(m.valor_unitario * m.cantidad), 0) FROM mermas m WHERE m.orden_id = o.id) AS mermas_valor_total,
+              -- RF-11: insumos que se restituyeron al cancelar (0 en una venta
+              -- no cancelada, si se canceló antes de llegar a 'preparando', o si
+              -- al cancelar en 'preparando' no se marcó ningún insumo como rescatado).
+              (SELECT COUNT(*)::int FROM movimientos_inventario mi
+                WHERE mi.orden_id = o.id AND mi.tipo = 'entrada') AS insumos_restituidos,
+              -- RF-08: cuánto duró la orden en 'preparando' (NULL si nunca llegó).
+              (SELECT EXTRACT(EPOCH FROM (COALESCE(oeh.fecha_fin, NOW()) - oeh.fecha_inicio))::int
+                FROM orden_estado_historial oeh
+                WHERE oeh.orden_id = o.id AND oeh.estado = 'preparando') AS segundos_preparacion,
+              -- Cancelación parcial: dinero devuelto al cliente por los productos
+              -- cancelados de ESTA orden (0 si nunca se canceló nada de ella).
+              (SELECT COALESCE(SUM(mc.monto), 0) FROM movimientos_caja mc
+                WHERE mc.orden_id = o.id AND mc.tipo = 'reembolso') AS monto_reembolsado
        FROM ventas v
        JOIN ordenes o ON o.id = v.orden_id
        JOIN usuarios u ON u.id = v.cajero_id
@@ -192,7 +294,8 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
     // (en vez de una por venta) para que la pantalla cargue rápido.
     const ordenIds = ventas.rows.map((v) => v.orden_id);
     const detalle = await pool.query(
-      `SELECT od.orden_id, od.cantidad, od.notas, vp.nombre AS variante_nombre, p.nombre AS producto_nombre
+      `SELECT od.id AS orden_detalle_id, od.orden_id, od.cantidad, od.notas, od.cancelado,
+              od.motivo_cancelacion, od.precio_unitario, vp.nombre AS variante_nombre, p.nombre AS producto_nombre
        FROM orden_detalle od
        JOIN variantes_producto vp ON vp.id = od.variante_id
        JOIN productos p ON p.id = vp.producto_id
@@ -207,10 +310,14 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
         detallePorOrden[fila.orden_id] = [];
       }
       detallePorOrden[fila.orden_id].push({
+        orden_detalle_id: fila.orden_detalle_id,
         producto: fila.producto_nombre,
         variante: fila.variante_nombre,
         cantidad: fila.cantidad,
         notas: fila.notas,
+        motivo_cancelacion: fila.motivo_cancelacion,
+        cancelado: fila.cancelado,
+        precio_unitario: fila.precio_unitario,
       });
     }
 
@@ -228,42 +335,165 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
 });
 
 // PATCH /api/ventas/:id/cancelar
-// Solo administrador o encargado pueden cancelar una venta (RF-03).
-// Deja registro de QUIÉN canceló (cancelado_por), CUÁNDO (fecha_cancelacion) y
-// el motivo (opcional). Una venta cancelada deja de contar en el corte de caja
-// y su comanda pasa a 'cancelada' (desaparece del tablero de cocina).
-// La venta y su orden se actualizan en una transacción para que nunca queden
-// en estados contradictorios.
+// Solo administrador o encargado pueden cancelar una venta (RF-03), total o
+// PARCIALMENTE (ver cabecera del archivo para la lógica completa).
+//
+// Cuerpo: {
+//   motivo?: string,
+//   orden_detalle_ids?: number[],   // qué productos cancelar; si se omite o
+//                                    // viene vacío, se cancelan TODOS los
+//                                    // activos (comportamiento de siempre)
+//   insumos_rescatados?: number[],  // solo importa si la comanda está
+//                                    // 'preparando': ids de insumo que se
+//                                    // RESCATAN (el resto queda como merma)
+// }
+//
+// La venta, la orden/líneas, las mermas, la restitución de inventario y el
+// reembolso se registran en una sola transacción.
 router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (req, res) => {
   const { id } = req.params;
-  const { motivo } = req.body;
+  const { motivo, orden_detalle_ids: lineasSolicitadas, insumos_rescatados } = req.body;
 
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // `AND estado = 'completada'` impide cancelar dos veces la misma venta:
-    // si ya estaba cancelada, el UPDATE no encuentra fila y se responde 404.
-    const venta = await client.query(
-      `UPDATE ventas
-       SET estado = 'cancelada', cancelado_por = $1, motivo_cancelacion = $2, fecha_cancelacion = NOW()
-       WHERE id = $3 AND estado = 'completada'
-       RETURNING *`,
-      [req.usuario.id, motivo || null, id]
-    );
-
-    if (venta.rows.length === 0) {
+    // La venta debe seguir 'completada' (impide cancelar algo ya cancelado
+    // del todo). FOR UPDATE: dos cancelaciones a la vez no pisan el cálculo.
+    const venta = await client.query(`SELECT * FROM ventas WHERE id = $1 FOR UPDATE`, [id]);
+    if (venta.rows.length === 0 || venta.rows[0].estado !== 'completada') {
       throw { status: 404, mensaje: 'La venta no existe o ya fue cancelada.' };
     }
 
-    // La comanda asociada también se cancela (sale del tablero de cocina).
-    await client.query(`UPDATE ordenes SET estado = 'cancelada' WHERE id = $1`, [
-      venta.rows[0].orden_id,
-    ]);
+    const ordenId = venta.rows[0].orden_id;
+
+    // Estado de la orden ANTES de tocar nada: decide qué pasa con los
+    // insumos (rescate selectivo, merma automática, o nada que descontar).
+    const ordenActual = await client.query(
+      `SELECT estado, numero_orden FROM ordenes WHERE id = $1 FOR UPDATE`,
+      [ordenId]
+    );
+    const { estado: estadoOrden, numero_orden: numeroOrden } = ordenActual.rows[0];
+
+    // Líneas activas (no canceladas todavía) de la orden — son las únicas
+    // candidatas a cancelar ahora.
+    const lineasActivas = await client.query(
+      `SELECT id, variante_id, cantidad, precio_unitario
+       FROM orden_detalle WHERE orden_id = $1 AND cancelado = FALSE`,
+      [ordenId]
+    );
+    if (lineasActivas.rows.length === 0) {
+      throw { status: 409, mensaje: 'Esta venta ya no tiene productos activos que cancelar.' };
+    }
+
+    // Sin `orden_detalle_ids` (o vacío), se cancelan TODAS las líneas activas
+    // — es el "cancelar la venta completa" de siempre. Con la lista, solo
+    // las que de verdad siguen activas (una línea ya cancelada se ignora en
+    // silencio en vez de dar error, por si el cliente manda algo desfasado).
+    const idsSolicitados = Array.isArray(lineasSolicitadas) ? new Set(lineasSolicitadas) : null;
+    const lineasACancelar =
+      idsSolicitados && idsSolicitados.size > 0
+        ? lineasActivas.rows.filter((l) => idsSolicitados.has(l.id))
+        : lineasActivas.rows;
+
+    if (lineasACancelar.length === 0) {
+      throw { status: 400, mensaje: 'Selecciona al menos un producto para cancelar.' };
+    }
+
+    // ---- MERMA a nivel producto: una fila por cada línea cancelada AHORA ----
+    let valorTotalMerma = 0;
+    for (const linea of lineasACancelar) {
+      valorTotalMerma += Number(linea.precio_unitario) * Number(linea.cantidad);
+      await client.query(
+        `INSERT INTO mermas
+           (variante_id, cantidad, motivo, responsable_id, orden_id, valor_unitario, estado_orden_previo)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          linea.variante_id,
+          linea.cantidad,
+          `Venta cancelada — orden ${numeroOrden} estaba en "${estadoOrden}"`,
+          req.usuario.id,
+          ordenId,
+          linea.precio_unitario,
+          estadoOrden,
+        ]
+      );
+      await client.query(
+        `UPDATE orden_detalle SET cancelado = TRUE, fecha_cancelacion = NOW(), motivo_cancelacion = $2 WHERE id = $1`,
+        [linea.id, motivo || null]
+      );
+    }
+
+    // ---- INSUMOS: rescate selectivo (preparando), merma automática (por_entregar/
+    // entregado), o nada que hacer (sin_preparar — nunca se descontó) ----
+    let insumosRestituidos = 0;
+    if (estadoOrden === 'preparando') {
+      const insumosDescontados = await calcularInsumosDeLineas(
+        client,
+        lineasACancelar.map((l) => l.id)
+      );
+      const idsRescatados = new Set(Array.isArray(insumos_rescatados) ? insumos_rescatados : []);
+      const aRestituir = insumosDescontados.filter((i) => idsRescatados.has(i.insumo_id));
+      if (aRestituir.length > 0) {
+        await registrarMovimientosInventario(client, aRestituir, {
+          tipo: 'entrada',
+          responsableId: req.usuario.id,
+          motivo: `Restitución parcial por cancelación — orden ${numeroOrden}`,
+          ordenId,
+        });
+      }
+      insumosRestituidos = aRestituir.length;
+    }
+    // 'sin_preparar': nunca se descontó nada, no hay nada que rescatar ni perder.
+    // 'por_entregar' / 'entregado': el producto ya está armado — todo el insumo
+    // ya descontado queda como consumido, no se restituye nada automáticamente.
+
+    // ---- ¿Queda alguna línea activa? Si no, la venta y la orden se cancelan
+    // por completo (igual que antes de este ajuste) ----
+    const lineasRestantes = lineasActivas.rows.length - lineasACancelar.length;
+    if (lineasRestantes === 0) {
+      await client.query(
+        `UPDATE ventas SET estado = 'cancelada', cancelado_por = $1, motivo_cancelacion = $2, fecha_cancelacion = NOW()
+         WHERE id = $3`,
+        [req.usuario.id, motivo || null, id]
+      );
+      await client.query(`UPDATE ordenes SET estado = 'cancelada' WHERE id = $1`, [ordenId]);
+      // RF-08: se cierra el renglón de historial que seguía abierto.
+      await client.query(
+        `UPDATE orden_estado_historial SET fecha_fin = NOW() WHERE orden_id = $1 AND fecha_fin IS NULL`,
+        [ordenId]
+      );
+    }
+    // Si quedan líneas activas, la venta sigue 'completada' y la comanda sigue
+    // su curso normal con lo que le queda — solo se le quitaron productos.
+
+    // ---- REEMBOLSO: lo que se le debe devolver al cliente por LO CANCELADO
+    // EN ESTA OPERACIÓN (nunca el total completo de la venta, por si ya hubo
+    // una cancelación parcial anterior) — movimiento de caja, mismo mecanismo
+    // que un retiro (resta del efectivo esperado), ligado a la orden. ----
+    if (valorTotalMerma > 0) {
+      await client.query(
+        `INSERT INTO movimientos_caja (tipo, monto, motivo, responsable_id, confirmado, confirmado_por, fecha_confirmacion, orden_id)
+         VALUES ('reembolso', $1, $2, $3, TRUE, $3, NOW(), $4)`,
+        [valorTotalMerma, `Reembolso por cancelación — orden ${numeroOrden}`, req.usuario.id, ordenId]
+      );
+    }
+
+    // Se vuelve a leer la venta (puede haber cambiado de estado arriba) para
+    // que la respuesta refleje su estado REAL, no la foto de antes de cancelar.
+    const ventaFinal = await client.query('SELECT * FROM ventas WHERE id = $1', [id]);
 
     await client.query('COMMIT');
-    res.json(venta.rows[0]);
+    res.json({
+      ...ventaFinal.rows[0],
+      cancelacion_total: lineasRestantes === 0,
+      productos_cancelados: lineasACancelar.length,
+      mermas_generadas: lineasACancelar.length,
+      mermas_valor_total: valorTotalMerma.toFixed(2),
+      insumos_restituidos: insumosRestituidos,
+      monto_reembolso: valorTotalMerma.toFixed(2),
+    });
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.status) {
