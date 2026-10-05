@@ -28,4 +28,14 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// SIN esto, un cliente INACTIVO del pool cuya conexión Neon cierra (se
+// "duerme" tras ~5 min sin uso — ver nota de planes gratuitos en CLAUDE.md)
+// dispara un error no capturado que tumba TODO el proceso de Node, no solo
+// esa conexión. `pg` exige este listener explícitamente para ese caso; sin
+// él, el servidor se cae solo cada vez que pasa suficiente tiempo sin
+// consultas y luego llega una nueva petición.
+pool.on('error', (error) => {
+  console.error('Error inesperado en una conexión inactiva del pool:', error.message);
+});
+
 module.exports = pool;
