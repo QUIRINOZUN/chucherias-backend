@@ -1,18 +1,29 @@
 // =============================================================================
 // routes/asistencias.js — CONTROL DE ASISTENCIAS (Sprint 3)
 // =============================================================================
-// Endpoints (prefijo /api/asistencias), todos exigen sesión, solo
-// administrador/encargado — igual que usuarios/insumos/caja, es información
-// de personal, no algo que el propio empleado capture desde su cuenta (ver la
-// nota de diseño más abajo).
+// Dos grupos de endpoints (prefijo /api/asistencias):
 //
+// AUTOSERVICIO (/mi-hoy, /mi-entrada, /mi-salida) — cualquier rol
+// autenticado salvo administrador. Es para cuando el personal NO
+// inicia/cierra sesión por turno (ej. un dispositivo de mostrador que se
+// queda logueado todo el día) y necesita marcar su propia asistencia desde
+// el botón del menú principal. Usa utils/asistenciaAutomatica.js — mismo
+// módulo que routes/auth.js usa para marcar por login/logout — y respeta
+// la ventana horaria de autoservicio (utils/fecha.js: VENTANA_ENTRADA/
+// VENTANA_SALIDA), el guardrail contra marcar una llegada antes de que el
+// negocio abra.
+//
+// GESTIÓN (el resto) — solo administrador/encargado, es información de
+// personal:
 //   GET   /?desde=&hasta=&empleado_id=  → historial con filtros (todos
 //                                          opcionales y combinables; sin
 //                                          filtros se ve TODO, mismo criterio
 //                                          que mermas/cortes de caja)
 //   GET   /hoy                          → asistencias de la fecha de HOY del
 //                                          negocio (alimenta el panel de
-//                                          "marcar entrada/salida")
+//                                          "marcar entrada/salida" de
+//                                          Asistencias, para TODOS los
+//                                          empleados, no solo el propio)
 //   POST  /entrada                      → marca la hora de entrada de un
 //                                          empleado, AHORA, en el día de hoy
 //   PATCH /:id/salida                   → marca la hora de salida de un
@@ -23,13 +34,11 @@
 //                                          (hora_entrada, hora_salida, fecha,
 //                                          observaciones)
 //
-// NOTA DE DISEÑO (decisión de Sprint 3): no todo empleado tiene una cuenta de
-// usuario (`empleados.usuario_id` es opcional — ver routes/empleados.js), así
-// que no existe un flujo de "marca tu propia entrada" universal. En su lugar,
-// quien abre o cierra el turno de alguien es siempre administrador/encargado
-// — el mismo criterio de autoridad que ya usa el resto del sistema (ajustes
-// de inventario, retiros de caja, mermas manuales). `registrado_por` guarda
-// quién hizo el registro, no de quién es la asistencia.
+// Estos de GESTIÓN son el mismo criterio de autoridad que ya usa el resto
+// del sistema (ajustes de inventario, retiros de caja, mermas manuales):
+// NUNCA tienen la ventana horaria del autoservicio — un administrador ya
+// tiene autoridad para registrar o corregir cualquier hora. Es lo que sigue
+// cubriendo al repartidor, que no tiene cuenta (su horario varía).
 //
 // NO se calculan retardos contra un horario esperado: ese dato (horario por
 // empleado) no existe todavía en el modelo — ver CLAUDE.md, pendiente de
@@ -38,11 +47,97 @@
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
-const { fechaHoyNegocio, horaAhoraNegocioSql, fechaValida } = require('../utils/fecha');
+const { fechaHoyNegocio, horaAhoraNegocioSql, fechaValida, VENTANA_ENTRADA, VENTANA_SALIDA } =
+  require('../utils/fecha');
+const {
+  empleadoLigado,
+  intentarRegistrarEntrada,
+  intentarRegistrarSalida,
+} = require('../utils/asistenciaAutomatica');
 
 const router = express.Router();
 
 router.use(verificarToken);
+
+// ---- AUTOSERVICIO: antes del filtro de rol de abajo, a propósito ----------
+// Mensajes de error legibles por `motivo` (ver utils/asistenciaAutomatica.js).
+const MENSAJES_ENTRADA = {
+  sin_empleado:
+    'Tu cuenta todavía no está ligada a un empleado. Pide a un administrador que te ligue desde Asistencias.',
+  fuera_de_horario: `Solo puedes marcar tu entrada entre las ${VENTANA_ENTRADA.desde} y las ${VENTANA_ENTRADA.hasta}.`,
+  ya_abierta: 'Ya tienes una entrada sin salida registrada hoy.',
+};
+const MENSAJES_SALIDA = {
+  sin_empleado:
+    'Tu cuenta todavía no está ligada a un empleado. Pide a un administrador que te ligue desde Asistencias.',
+  fuera_de_horario: `Solo puedes marcar tu salida entre las ${VENTANA_SALIDA.desde} y las ${VENTANA_SALIDA.hasta}.`,
+  sin_entrada_abierta: 'No tienes una entrada abierta para marcar salida.',
+};
+
+// GET /api/asistencias/mi-hoy
+// El propio empleado consulta su estado de hoy, para que el botón del menú
+// sepa si decir "Marcar entrada" o "Marcar salida". El administrador (que
+// nunca tiene empleado ligado) simplemente recibe "sin ligar".
+router.get('/mi-hoy', async (req, res) => {
+  try {
+    const empleadoId =
+      req.usuario.rol === 'administrador' ? null : await empleadoLigado(pool, req.usuario.id);
+    if (!empleadoId) {
+      return res.json({ ligado: false, abierta: null, completados: 0 });
+    }
+    const filas = await pool.query(
+      `SELECT id, hora_entrada, hora_salida FROM asistencias
+       WHERE empleado_id = $1 AND fecha = $2::date ORDER BY hora_entrada DESC`,
+      [empleadoId, fechaHoyNegocio()]
+    );
+    const abierta = filas.rows.find((f) => !f.hora_salida) ?? null;
+    const completados = filas.rows.filter((f) => f.hora_salida).length;
+    res.json({ ligado: true, abierta, completados });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al consultar tu asistencia de hoy.' });
+  }
+});
+
+// POST /api/asistencias/mi-entrada
+router.post('/mi-entrada', async (req, res) => {
+  if (req.usuario.rol === 'administrador') {
+    return res.status(400).json({ error: 'El administrador no lleva asistencia.' });
+  }
+  try {
+    const resultado = await intentarRegistrarEntrada(pool, req.usuario.id);
+    if (!resultado.ok) {
+      return res
+        .status(400)
+        .json({ error: MENSAJES_ENTRADA[resultado.motivo] || 'No se pudo registrar tu entrada.' });
+    }
+    res.status(201).json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al registrar tu entrada.' });
+  }
+});
+
+// PATCH /api/asistencias/mi-salida
+router.patch('/mi-salida', async (req, res) => {
+  if (req.usuario.rol === 'administrador') {
+    return res.status(400).json({ error: 'El administrador no lleva asistencia.' });
+  }
+  try {
+    const resultado = await intentarRegistrarSalida(pool, req.usuario.id);
+    if (!resultado.ok) {
+      return res
+        .status(400)
+        .json({ error: MENSAJES_SALIDA[resultado.motivo] || 'No se pudo registrar tu salida.' });
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al registrar tu salida.' });
+  }
+});
+
+// ---- GESTIÓN: de aquí en adelante, solo administrador/encargado ----------
 router.use(requiereRol('administrador', 'encargado'));
 
 // Columnas comunes de respuesta, con el nombre del empleado y de quien

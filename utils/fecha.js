@@ -45,6 +45,35 @@ function horaAhoraNegocioSql() {
   return `(NOW() AT TIME ZONE '${ZONA_NEGOCIO}')::time`;
 }
 
+// Hora actual (HH:MM) en la zona del negocio — para comparar contra las
+// ventanas de autoservicio de abajo. 'en-GB' con hour12:false da 24 horas.
+function horaActualNegocio() {
+  return new Date().toLocaleTimeString('en-GB', {
+    timeZone: ZONA_NEGOCIO,
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+// Ventanas de horario para el AUTOSERVICIO de asistencia (marcar la propia
+// entrada/salida por login/logout o por el botón del menú principal —
+// NUNCA para lo que registra un administrador/encargado a mano, que no
+// tiene esta restricción porque ya tiene autoridad para eso). Es el
+// guardrail simple contra marcar una llegada antes de que el negocio abra:
+// el negocio opera de 14:00 a 21:30 (ver nota de horario arriba). Ajustar
+// aquí si el horario real del negocio cambia.
+const VENTANA_ENTRADA = { desde: '13:00', hasta: '21:30' }; // 1h antes de abrir, hasta el cierre
+const VENTANA_SALIDA = { desde: '14:00', hasta: '23:00' }; // desde que abre, hasta 1.5h después del cierre
+
+// true si la hora actual del negocio cae dentro de la ventana de ese tipo.
+// Comparación de texto "HH:MM" funciona igual que numérica para horas válidas.
+function dentroDeVentanaAsistencia(tipo) {
+  const ventana = tipo === 'entrada' ? VENTANA_ENTRADA : VENTANA_SALIDA;
+  const ahora = horaActualNegocio();
+  return ahora >= ventana.desde && ahora <= ventana.hasta;
+}
+
 // true si `texto` es una fecha real en formato YYYY-MM-DD (rechaza 2026-13-45).
 // Se usa para validar cualquier fecha que llegue por query string o body
 // antes de mandarla a la base de datos.
@@ -60,4 +89,12 @@ function fechaValida(texto) {
   return !Number.isNaN(fecha.getTime()) && fecha.toISOString().slice(0, 10) === texto;
 }
 
-module.exports = { fechaHoyNegocio, diaNegocioSql, horaAhoraNegocioSql, fechaValida };
+module.exports = {
+  fechaHoyNegocio,
+  diaNegocioSql,
+  horaAhoraNegocioSql,
+  fechaValida,
+  dentroDeVentanaAsistencia,
+  VENTANA_ENTRADA,
+  VENTANA_SALIDA,
+};
