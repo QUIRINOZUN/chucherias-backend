@@ -19,6 +19,9 @@
 //   /api/ventas    → registrar, listar y cancelar ventas       (routes/ventas.js)
 //   /api/caja      → resumen del día y cortes de caja          (routes/caja.js)
 //   /api/ordenes   → comandas y sus estados (Sprint 2)         (routes/ordenes.js)
+//   /api/insumos   → inventario: altas, existencias, entradas  (routes/insumos.js)
+//   /api/proveedores → catálogo de proveedores                 (routes/proveedores.js)
+//   /api/mermas    → consulta consolidada de mermas             (routes/mermas.js)
 // =============================================================================
 
 // Carga el archivo .env ANTES de leer cualquier process.env.
@@ -34,6 +37,9 @@ const catalogoRoutes = require('./routes/catalogo');
 const ventasRoutes = require('./routes/ventas');
 const cajaRoutes = require('./routes/caja');
 const ordenesRoutes = require('./routes/ordenes');
+const insumosRoutes = require('./routes/insumos');
+const proveedoresRoutes = require('./routes/proveedores');
+const mermasRoutes = require('./routes/mermas');
 
 const app = express();
 
@@ -82,6 +88,11 @@ app.use('/api/ventas', ventasRoutes);
 app.use('/api/caja', cajaRoutes);
 // Comandas: seguimiento de cada pedido en cocina (Sprint 2).
 app.use('/api/ordenes', ordenesRoutes);
+// Inventario: insumos, existencias calculadas y proveedores.
+app.use('/api/insumos', insumosRoutes);
+app.use('/api/proveedores', proveedoresRoutes);
+// Consulta consolidada de mermas (de producto y de insumo, en un solo lugar).
+app.use('/api/mermas', mermasRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)
