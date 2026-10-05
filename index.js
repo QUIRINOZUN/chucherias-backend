@@ -22,6 +22,8 @@
 //   /api/insumos   → inventario: altas, existencias, entradas  (routes/insumos.js)
 //   /api/proveedores → catálogo de proveedores                 (routes/proveedores.js)
 //   /api/mermas    → consulta consolidada de mermas             (routes/mermas.js)
+//   /api/empleados → personal del negocio (Sprint 3)             (routes/empleados.js)
+//   /api/asistencias → entradas, salidas e historial (Sprint 3)  (routes/asistencias.js)
 // =============================================================================
 
 // Carga el archivo .env ANTES de leer cualquier process.env.
@@ -40,6 +42,8 @@ const ordenesRoutes = require('./routes/ordenes');
 const insumosRoutes = require('./routes/insumos');
 const proveedoresRoutes = require('./routes/proveedores');
 const mermasRoutes = require('./routes/mermas');
+const empleadosRoutes = require('./routes/empleados');
+const asistenciasRoutes = require('./routes/asistencias');
 
 const app = express();
 
@@ -93,6 +97,9 @@ app.use('/api/insumos', insumosRoutes);
 app.use('/api/proveedores', proveedoresRoutes);
 // Consulta consolidada de mermas (de producto y de insumo, en un solo lugar).
 app.use('/api/mermas', mermasRoutes);
+// Control de personal: empleados y sus asistencias (Sprint 3).
+app.use('/api/empleados', empleadosRoutes);
+app.use('/api/asistencias', asistenciasRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)

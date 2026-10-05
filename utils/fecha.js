@@ -11,7 +11,7 @@
 // Todo lo que dependa de "el día" (resumen de caja, corte, ventas de hoy) debe
 // pasar por este archivo, nunca usar `fecha::date` directamente en SQL.
 //
-// USADO POR: routes/ventas.js y routes/caja.js.
+// USADO POR: routes/ventas.js, routes/caja.js y routes/asistencias.js.
 // =============================================================================
 
 // El negocio (Durango) opera de 2:00 pm a 9:30 pm hora local, que en UTC es
@@ -37,6 +37,14 @@ function diaNegocioSql(columna) {
   return `((${columna} AT TIME ZONE 'UTC') AT TIME ZONE '${ZONA_NEGOCIO}')::date`;
 }
 
+// Expresión SQL que da la HORA actual (sin fecha) en la zona del negocio.
+// Para columnas TIME (ej. asistencias.hora_entrada/hora_salida), que no
+// guardan zona horaria — hay que convertir el reloj de Neon (UTC) antes de
+// quedarse solo con la hora, igual que diaNegocioSql hace con la fecha.
+function horaAhoraNegocioSql() {
+  return `(NOW() AT TIME ZONE '${ZONA_NEGOCIO}')::time`;
+}
+
 // true si `texto` es una fecha real en formato YYYY-MM-DD (rechaza 2026-13-45).
 // Se usa para validar cualquier fecha que llegue por query string o body
 // antes de mandarla a la base de datos.
@@ -52,4 +60,4 @@ function fechaValida(texto) {
   return !Number.isNaN(fecha.getTime()) && fecha.toISOString().slice(0, 10) === texto;
 }
 
-module.exports = { fechaHoyNegocio, diaNegocioSql, fechaValida };
+module.exports = { fechaHoyNegocio, diaNegocioSql, horaAhoraNegocioSql, fechaValida };
