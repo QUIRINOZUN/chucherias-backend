@@ -24,6 +24,7 @@
 //   /api/mermas    → consulta consolidada de mermas             (routes/mermas.js)
 //   /api/empleados → personal del negocio (Sprint 3)             (routes/empleados.js)
 //   /api/asistencias → entradas, salidas e historial (Sprint 3)  (routes/asistencias.js)
+//   /api/horarios  → horario semanal por empleado (Sprint 3)     (routes/horarios.js)
 // =============================================================================
 
 // Carga el archivo .env ANTES de leer cualquier process.env.
@@ -44,6 +45,7 @@ const proveedoresRoutes = require('./routes/proveedores');
 const mermasRoutes = require('./routes/mermas');
 const empleadosRoutes = require('./routes/empleados');
 const asistenciasRoutes = require('./routes/asistencias');
+const horariosRoutes = require('./routes/horarios');
 
 const app = express();
 
@@ -100,6 +102,7 @@ app.use('/api/mermas', mermasRoutes);
 // Control de personal: empleados y sus asistencias (Sprint 3).
 app.use('/api/empleados', empleadosRoutes);
 app.use('/api/asistencias', asistenciasRoutes);
+app.use('/api/horarios', horariosRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)

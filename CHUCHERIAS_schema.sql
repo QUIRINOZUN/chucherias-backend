@@ -42,6 +42,21 @@ CREATE TABLE asistencias (
     observaciones   VARCHAR(255)
 );
 
+-- Horario SEMANAL recurrente por empleado (Sprint 3): una fila por cada día
+-- de la semana que trabaja (sin fila = libre ese día). No tiene fecha propia
+-- -- se repite cada semana hasta que alguien lo edite. Sirve hoy para que el
+-- administrador/encargado asignen el horario esperado; en una fase futura
+-- podría usarse para calcular retardos contra asistencias.hora_entrada.
+CREATE TABLE horarios (
+    id            SERIAL PRIMARY KEY,
+    empleado_id   INTEGER NOT NULL REFERENCES empleados(id),
+    dia_semana    VARCHAR(10) NOT NULL
+                  CHECK (dia_semana IN ('lunes','martes','miercoles','jueves','viernes','sabado','domingo')),
+    hora_entrada  TIME NOT NULL,
+    hora_salida   TIME NOT NULL,
+    UNIQUE (empleado_id, dia_semana)
+);
+
 -- ===================== CATÁLOGO Y RECETARIO =====================
 
 CREATE TABLE categorias (
