@@ -25,6 +25,7 @@
 //   /api/empleados → personal del negocio (Sprint 3)             (routes/empleados.js)
 //   /api/asistencias → entradas, salidas e historial (Sprint 3)  (routes/asistencias.js)
 //   /api/horarios  → horario semanal por empleado (Sprint 3)     (routes/horarios.js)
+//   /api/recetas   → recetario: insumos por variante              (routes/recetas.js)
 // =============================================================================
 
 // Carga el archivo .env ANTES de leer cualquier process.env.
@@ -46,6 +47,7 @@ const mermasRoutes = require('./routes/mermas');
 const empleadosRoutes = require('./routes/empleados');
 const asistenciasRoutes = require('./routes/asistencias');
 const horariosRoutes = require('./routes/horarios');
+const recetasRoutes = require('./routes/recetas');
 
 const app = express();
 
@@ -103,6 +105,7 @@ app.use('/api/mermas', mermasRoutes);
 app.use('/api/empleados', empleadosRoutes);
 app.use('/api/asistencias', asistenciasRoutes);
 app.use('/api/horarios', horariosRoutes);
+app.use('/api/recetas', recetasRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)
