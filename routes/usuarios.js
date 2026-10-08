@@ -2,16 +2,24 @@
 // routes/usuarios.js — GESTIÓN DE CUENTAS DE PERSONAL (Sprint 1, RF-24)
 // =============================================================================
 // Endpoints (prefijo /api/usuarios), todos exigen sesión:
-//   GET   /roles        → catálogo de roles para el formulario  (administrador)
-//   GET   /             → lista de usuarios                     (administrador, encargado)
-//   POST  /             → crear cuenta                          (administrador)
-//   PATCH /:id          → editar nombre, usuario, rol, contraseña (administrador)
-//   PATCH /:id/activo   → activar / desactivar cuenta           (administrador)
+//   GET    /roles        → catálogo de roles para el formulario  (administrador)
+//   GET    /              → lista de usuarios                     (administrador, encargado)
+//   POST   /              → crear cuenta                          (administrador)
+//   PATCH  /:id          → editar nombre, usuario, rol, contraseña (administrador)
+//   PATCH  /:id/activo   → activar / desactivar cuenta           (administrador)
+//   DELETE /:id          → eliminar cuenta, SOLO si nunca se usó (administrador)
 //
 // REGLAS
-//   - Solo el administrador crea, edita o desactiva cuentas.
-//   - Las cuentas NUNCA se borran: se desactivan (activo = FALSE), así se
-//     conserva el historial de ventas, cortes y órdenes de esa persona.
+//   - Solo el administrador crea, edita, desactiva o elimina cuentas.
+//   - El camino normal para "retirar" una cuenta sigue siendo desactivarla
+//     (activo = FALSE): conserva su historial de ventas, cortes, asistencias,
+//     etc. DELETE es la excepción — pensado para una cuenta creada por error
+//     o de prueba que nunca llegó a usarse. `usuarios` tiene FK entrantes
+//     desde 9 tablas (empleados, asistencias, ventas, cortes_caja, órdenes,
+//     movimientos de caja/inventario, mermas) sin ON DELETE CASCADE, así que
+//     Postgres rechaza el DELETE solo (error 23503) si la cuenta ya tiene
+//     cualquier historial — se traduce aquí a un mensaje claro (409) en vez
+//     de dejar pasar el error crudo de la base.
 //   - El nombre de usuario es único (409 si ya existe).
 //   - Las contraseñas se guardan cifradas con bcrypt; jamás se devuelven.
 // =============================================================================
@@ -173,6 +181,39 @@ router.patch('/:id/activo', requiereRol('administrador'), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al actualizar el usuario.' });
+  }
+});
+
+// DELETE /api/usuarios/:id
+// Elimina una cuenta de verdad — solo funciona si nunca se usó (ver nota de
+// diseño al inicio del archivo). Si tiene cualquier historial, Postgres
+// rechaza el borrado por sus llaves foráneas y aquí se traduce a un 409 con
+// un mensaje que sugiere desactivarla en su lugar.
+router.delete('/:id', requiereRol('administrador'), async (req, res) => {
+  const { id } = req.params;
+
+  // Nadie se elimina a sí mismo — ni siquiera un administrador de prueba sin
+  // historial, para no quedarse sin sesión a mitad de la operación.
+  if (Number(id) === req.usuario.id) {
+    return res.status(400).json({ error: 'No puedes eliminar tu propia cuenta.' });
+  }
+
+  try {
+    const resultado = await pool.query('DELETE FROM usuarios WHERE id = $1 RETURNING id', [id]);
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado.' });
+    }
+    res.json({ id: resultado.rows[0].id, eliminado: true });
+  } catch (error) {
+    // 23503 = foreign_key_violation: la cuenta ya tiene historial (ventas,
+    // cortes, asistencias, etc.) en alguna de las tablas que la referencian.
+    if (error.code === '23503') {
+      return res.status(409).json({
+        error: 'No se puede eliminar: esta cuenta ya tiene historial registrado. Desactívala en su lugar.',
+      });
+    }
+    console.error(error);
+    res.status(500).json({ error: 'Error al eliminar el usuario.' });
   }
 });
 
