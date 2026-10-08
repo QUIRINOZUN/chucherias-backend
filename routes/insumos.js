@@ -9,6 +9,7 @@
 //                             alerta de mínimo
 //   GET   /categorias       → catálogo de categorías de insumo (para agrupar
 //                             la lista y para el selector del formulario)
+//   POST  /categorias       → crear una categoría de insumo nueva
 //   GET   /:id/movimientos  → historial de movimientos de un insumo (auditoría)
 //   POST  /                 → crear insumo
 //   PATCH /:id              → editar insumo (nombre, unidad, mínimo, proveedor)
@@ -86,6 +87,30 @@ router.get('/categorias', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener las categorías de insumo.' });
+  }
+});
+
+// POST /api/insumos/categorias
+// Da de alta una categoría de insumo nueva (2026-10-08: antes solo existían
+// las 9 cargadas por scripts/seed-categorias-insumo.js, sin forma de agregar
+// más desde la app). El nombre es único — 409 si ya existe.
+router.post('/categorias', async (req, res) => {
+  const { nombre } = req.body;
+  if (!nombre?.trim()) {
+    return res.status(400).json({ error: 'El nombre de la categoría es obligatorio.' });
+  }
+  try {
+    const resultado = await pool.query(
+      'INSERT INTO categorias_insumo (nombre) VALUES ($1) RETURNING id, nombre',
+      [nombre.trim()]
+    );
+    res.status(201).json(resultado.rows[0]);
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'Ya existe una categoría con ese nombre.' });
+    }
+    console.error(error);
+    res.status(500).json({ error: 'Error al crear la categoría.' });
   }
 });
 
