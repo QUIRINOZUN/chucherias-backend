@@ -96,7 +96,8 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
     // (incluye `notas`: lo que el cliente pidió quitar o cambiar).
     const ordenIds = ordenes.rows.map((o) => o.id);
     const detalle = await pool.query(
-      `SELECT od.orden_id, od.cantidad, od.notas, vp.nombre AS variante_nombre, p.nombre AS producto_nombre
+      `SELECT od.orden_id, od.variante_id, od.cantidad, od.notas,
+              vp.nombre AS variante_nombre, p.nombre AS producto_nombre
        FROM orden_detalle od
        JOIN variantes_producto vp ON vp.id = od.variante_id
        JOIN productos p ON p.id = vp.producto_id
@@ -113,6 +114,7 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
       detallePorOrden[fila.orden_id].push({
         producto: fila.producto_nombre,
         variante: fila.variante_nombre,
+        variante_id: fila.variante_id,
         cantidad: fila.cantidad,
         notas: fila.notas,
       });

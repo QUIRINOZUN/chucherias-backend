@@ -143,6 +143,16 @@ CREATE TABLE receta_insumos (
     unidad_medida  VARCHAR(20) NOT NULL
 );
 
+-- 2026-10-09: tutorial de elaboración paso a paso (para auxiliares de cocina
+-- nuevos), editable desde Recetario y consultable desde Comandas.
+CREATE TABLE receta_pasos (
+    id           SERIAL PRIMARY KEY,
+    receta_id    INTEGER NOT NULL REFERENCES recetas(id),
+    numero_paso  INTEGER NOT NULL,
+    descripcion  TEXT NOT NULL,
+    UNIQUE (receta_id, numero_paso)
+);
+
 CREATE TABLE movimientos_inventario (
     id              SERIAL PRIMARY KEY,
     insumo_id       INTEGER NOT NULL REFERENCES insumos(id),
