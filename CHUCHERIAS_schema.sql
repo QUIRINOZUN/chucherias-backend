@@ -80,13 +80,16 @@ CREATE TABLE categorias (
 );
 
 CREATE TABLE productos (
-    id            SERIAL PRIMARY KEY,
-    categoria_id  INTEGER NOT NULL REFERENCES categorias(id),
-    nombre        VARCHAR(100) NOT NULL,
-    descripcion   TEXT,
-    precio_base   NUMERIC(10,2) NOT NULL,
-    imagen_url    VARCHAR(255),             -- URL de Cloudinary
-    activo        BOOLEAN NOT NULL DEFAULT TRUE
+    id                 SERIAL PRIMARY KEY,
+    categoria_id       INTEGER NOT NULL REFERENCES categorias(id),
+    nombre             VARCHAR(100) NOT NULL,
+    descripcion        TEXT,
+    precio_base        NUMERIC(10,2) NOT NULL,
+    imagen_url         VARCHAR(255),        -- URL de Cloudinary (secure_url)
+    -- 2026-10-09: id que Cloudinary necesita para borrar/reemplazar la foto
+    -- sin dejar archivos huérfanos en la cuenta — ver utils/cloudinary.js.
+    imagen_public_id   VARCHAR(255),
+    activo             BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE variantes_producto (
@@ -96,7 +99,10 @@ CREATE TABLE variantes_producto (
     -- agrega al carrito y la ÚNICA fuente de precios: el servidor siempre lee
     -- el precio de aquí, nunca del cliente.
     nombre       VARCHAR(80) NOT NULL,      -- ej. "12 oz", "Paquete 12 piezas", "Único"
-    precio       NUMERIC(10,2) NOT NULL
+    precio       NUMERIC(10,2) NOT NULL,
+    -- 2026-10-09: deshabilitar UNA presentación sin ocultar todo el producto
+    -- (ej. "Paquete #3" agotado) — mismo patrón que productos.activo.
+    activo       BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE recetas (
