@@ -57,6 +57,21 @@ CREATE TABLE horarios (
     UNIQUE (empleado_id, dia_semana)
 );
 
+-- Excepción de horario por FECHA específica (2026-10-08), por empleado: un
+-- día suelto distinto al patrón semanal normal (feriado, vacaciones, etc.)
+-- sin afectar las demás semanas. Sin fila aquí = se usa `horarios` (o
+-- "descanso" si tampoco hay fila ahí) — ver nota completa en
+-- migraciones/2026-10-08_horario_excepciones.sql.
+CREATE TABLE horario_excepciones (
+    id            SERIAL PRIMARY KEY,
+    empleado_id   INTEGER NOT NULL REFERENCES empleados(id),
+    fecha         DATE NOT NULL,
+    tipo          VARCHAR(10) NOT NULL CHECK (tipo IN ('trabaja', 'descanso', 'cerrado')),
+    hora_entrada  TIME,
+    hora_salida   TIME,
+    UNIQUE (empleado_id, fecha)
+);
+
 -- ===================== CATÁLOGO Y RECETARIO =====================
 
 CREATE TABLE categorias (
