@@ -23,6 +23,10 @@
 //                             → el cajero confirma un retiro (dispara el
 //                               comprobante imprimible en el POS)
 //                               (administrador, encargado, cajero)
+//   GET   /retiros?fecha=     → TODOS los retiros de un día (confirmados o
+//                               no) + su suma, para el ticket "Listado de
+//                               retiros" que se imprime al hacer el corte
+//                               (administrador, encargado, cajero)
 //
 // IDEA DEL CORTE (RF-04)
 //   Al cerrar, el cajero cuenta el dinero físico. El sistema suma las ventas
@@ -388,6 +392,40 @@ router.patch('/movimientos/:id/confirmar', requiereRol(...ROLES_CAJA), async (re
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al confirmar el retiro.' });
+  }
+});
+
+// GET /api/caja/retiros?fecha=YYYY-MM-DD
+// Todos los retiros del día (confirmados o no — ya salieron físicamente del
+// cajón en cuanto se registran, ver nota de movimientosCajaDelDia arriba),
+// más su suma, para el ticket "Listado de retiros" que se imprime al hacer
+// el corte (2026-10-12). Mismos roles que pueden hacer el corte (ROLES_CAJA):
+// a diferencia de GET /movimientos (solo admin/encargado, trae TODOS los
+// tipos), este es más angosto a propósito — solo retiros, y accesible
+// también al cajero, que es quien de verdad lo usa al cerrar su turno.
+router.get('/retiros', requiereRol(...ROLES_CAJA), async (req, res) => {
+  const fecha = req.query.fecha || fechaHoyNegocio();
+
+  if (!fechaValida(fecha)) {
+    return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+  }
+
+  try {
+    const resultado = await pool.query(
+      `SELECT mc.id, mc.monto, mc.motivo, mc.fecha, mc.confirmado,
+              u.nombre AS responsable, uc.nombre AS confirmado_por_nombre
+       FROM movimientos_caja mc
+       JOIN usuarios u ON u.id = mc.responsable_id
+       LEFT JOIN usuarios uc ON uc.id = mc.confirmado_por
+       WHERE mc.tipo = 'retiro' AND ${diaNegocioSql('mc.fecha')} = $1
+       ORDER BY mc.fecha ASC`,
+      [fecha]
+    );
+    const total = resultado.rows.reduce((suma, fila) => suma + Number(fila.monto), 0);
+    res.json({ fecha, total, retiros: resultado.rows });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener el listado de retiros.' });
   }
 });
 

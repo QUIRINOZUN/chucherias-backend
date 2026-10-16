@@ -1,20 +1,8 @@
 // =============================================================================
 // routes/asistencias.js — CONTROL DE ASISTENCIAS (Sprint 3)
 // =============================================================================
-// Dos grupos de endpoints (prefijo /api/asistencias):
-//
-// AUTOSERVICIO (/mi-hoy, /mi-entrada, /mi-salida) — cualquier rol
-// autenticado salvo administrador. Es para cuando el personal NO
-// inicia/cierra sesión por turno (ej. un dispositivo de mostrador que se
-// queda logueado todo el día) y necesita marcar su propia asistencia desde
-// el botón del menú principal. Usa utils/asistenciaAutomatica.js — mismo
-// módulo que routes/auth.js usa para marcar por login/logout — y respeta
-// la ventana horaria de autoservicio (utils/fecha.js: VENTANA_ENTRADA/
-// VENTANA_SALIDA), el guardrail contra marcar una llegada antes de que el
-// negocio abra.
-//
-// GESTIÓN (el resto) — solo administrador/encargado, es información de
-// personal:
+// Todo el prefijo /api/asistencias es exclusivo de administrador/encargado
+// — es información de personal:
 //   GET   /?desde=&hasta=&empleado_id=  → historial con filtros (todos
 //                                          opcionales y combinables; sin
 //                                          filtros se ve TODO, mismo criterio
@@ -23,7 +11,7 @@
 //                                          negocio (alimenta el panel de
 //                                          "marcar entrada/salida" de
 //                                          Asistencias, para TODOS los
-//                                          empleados, no solo el propio)
+//                                          empleados)
 //   POST  /entrada                      → marca la hora de entrada de un
 //                                          empleado, AHORA, en el día de hoy
 //   PATCH /:id/salida                   → marca la hora de salida de un
@@ -32,113 +20,57 @@
 //                                          día que no se marcó en vivo)
 //   PATCH /:id                          → corrige un registro ya existente
 //                                          (hora_entrada, hora_salida, fecha,
-//                                          observaciones)
+//                                          observaciones) — deja evidencia
+//                                          automática, ver RF-19 abajo
+//   GET   /:id/correcciones             → historial de correcciones de ESE
+//                                          registro (RF-19)
+//   GET   /retardos?desde=&hasta=&empleado_id=
+//                                        → RF-20: entradas reales más
+//                                          tarde que la hora esperada
 //
-// Estos de GESTIÓN son el mismo criterio de autoridad que ya usa el resto
-// del sistema (ajustes de inventario, retiros de caja, mermas manuales):
-// NUNCA tienen la ventana horaria del autoservicio — un administrador ya
-// tiene autoridad para registrar o corregir cualquier hora. Es lo que sigue
-// cubriendo al repartidor, que no tiene cuenta (su horario varía).
+// Mismo criterio de autoridad que ya usa el resto del sistema (ajustes de
+// inventario, retiros de caja, mermas manuales): solo administrador/
+// encargado registran o corrigen asistencia, nunca el propio empleado.
 //
-// NO se calculan retardos contra un horario esperado: ese dato (horario por
-// empleado) no existe todavía en el modelo — ver CLAUDE.md, pendiente de
-// una fase futura si el usuario lo pide.
+// 2026-10-11: se retiró el autoservicio (/mi-hoy, /mi-entrada, /mi-salida,
+// más la entrada/salida automática al iniciar/cerrar sesión en
+// routes/auth.js) a petición del usuario — ver utils/asistenciaAutomatica.js
+// (eliminado) y utils/fecha.js (VENTANA_ENTRADA/VENTANA_SALIDA/
+// dentroDeVentanaAsistencia, eliminados también por quedar sin uso).
+//
+// RF-19 (2026-10-13): cada PATCH /:id que de verdad cambia algo (fecha,
+// hora_entrada, hora_salida u observaciones) ahora inserta una fila en
+// asistencias_historial_correcciones ANTES de aplicar el cambio — con quién
+// corrigió, cuándo, y el valor que tenía ESE campo antes. Es un historial
+// completo (una fila por corrección), no solo "la última corrección".
+//
+// RF-20 (2026-10-13): GET /retardos cruza asistencias.hora_entrada contra el
+// horario esperado de ese día (excepción de fecha → horario recurrente →
+// si no hay ninguno de los dos, ese día no tiene hora esperada y no cuenta
+// como retardo). Tolerancia: CUALQUIER minuto tarde cuenta (sin margen) —
+// decisión del usuario.
 // =============================================================================
-const express = require('express');
-const pool = require('../db');
-const { verificarToken, requiereRol } = require('../middleware/auth');
-const { fechaHoyNegocio, horaAhoraNegocioSql, fechaValida, VENTANA_ENTRADA, VENTANA_SALIDA } =
-  require('../utils/fecha');
+const express = require("express");
+const pool = require("../db");
+const { verificarToken, requiereRol } = require("../middleware/auth");
 const {
-  empleadoLigado,
-  intentarRegistrarEntrada,
-  intentarRegistrarSalida,
-} = require('../utils/asistenciaAutomatica');
+  fechaHoyNegocio,
+  horaAhoraNegocioSql,
+  fechaValida,
+} = require("../utils/fecha");
 
 const router = express.Router();
 
 router.use(verificarToken);
 
-// ---- AUTOSERVICIO: antes del filtro de rol de abajo, a propósito ----------
-// Mensajes de error legibles por `motivo` (ver utils/asistenciaAutomatica.js).
-const MENSAJES_ENTRADA = {
-  sin_empleado:
-    'Tu cuenta todavía no está ligada a un empleado. Pide a un administrador que te ligue desde Asistencias.',
-  fuera_de_horario: `Solo puedes marcar tu entrada entre las ${VENTANA_ENTRADA.desde} y las ${VENTANA_ENTRADA.hasta}.`,
-  ya_abierta: 'Ya tienes una entrada sin salida registrada hoy.',
-};
-const MENSAJES_SALIDA = {
-  sin_empleado:
-    'Tu cuenta todavía no está ligada a un empleado. Pide a un administrador que te ligue desde Asistencias.',
-  fuera_de_horario: `Solo puedes marcar tu salida entre las ${VENTANA_SALIDA.desde} y las ${VENTANA_SALIDA.hasta}.`,
-  sin_entrada_abierta: 'No tienes una entrada abierta para marcar salida.',
-};
-
-// GET /api/asistencias/mi-hoy
-// El propio empleado consulta su estado de hoy, para que el botón del menú
-// sepa si decir "Marcar entrada" o "Marcar salida". El administrador (que
-// nunca tiene empleado ligado) simplemente recibe "sin ligar".
-router.get('/mi-hoy', async (req, res) => {
-  try {
-    const empleadoId =
-      req.usuario.rol === 'administrador' ? null : await empleadoLigado(pool, req.usuario.id);
-    if (!empleadoId) {
-      return res.json({ ligado: false, abierta: null, completados: 0 });
-    }
-    const filas = await pool.query(
-      `SELECT id, hora_entrada, hora_salida FROM asistencias
-       WHERE empleado_id = $1 AND fecha = $2::date ORDER BY hora_entrada DESC`,
-      [empleadoId, fechaHoyNegocio()]
-    );
-    const abierta = filas.rows.find((f) => !f.hora_salida) ?? null;
-    const completados = filas.rows.filter((f) => f.hora_salida).length;
-    res.json({ ligado: true, abierta, completados });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al consultar tu asistencia de hoy.' });
-  }
-});
-
-// POST /api/asistencias/mi-entrada
-router.post('/mi-entrada', async (req, res) => {
-  if (req.usuario.rol === 'administrador') {
-    return res.status(400).json({ error: 'El administrador no lleva asistencia.' });
-  }
-  try {
-    const resultado = await intentarRegistrarEntrada(pool, req.usuario.id);
-    if (!resultado.ok) {
-      return res
-        .status(400)
-        .json({ error: MENSAJES_ENTRADA[resultado.motivo] || 'No se pudo registrar tu entrada.' });
-    }
-    res.status(201).json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al registrar tu entrada.' });
-  }
-});
-
-// PATCH /api/asistencias/mi-salida
-router.patch('/mi-salida', async (req, res) => {
-  if (req.usuario.rol === 'administrador') {
-    return res.status(400).json({ error: 'El administrador no lleva asistencia.' });
-  }
-  try {
-    const resultado = await intentarRegistrarSalida(pool, req.usuario.id);
-    if (!resultado.ok) {
-      return res
-        .status(400)
-        .json({ error: MENSAJES_SALIDA[resultado.motivo] || 'No se pudo registrar tu salida.' });
-    }
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al registrar tu salida.' });
-  }
-});
-
-// ---- GESTIÓN: de aquí en adelante, solo administrador/encargado ----------
-router.use(requiereRol('administrador', 'encargado'));
+// true si `id` (de req.params) es un entero positivo real. Sin esto, un id
+// no numérico (ej. una ruta vieja/typo) llegaba crudo a una columna
+// INTEGER y Postgres lo rechazaba sin que el código lo capturara — 500 en
+// vez de un 400 claro.
+function idValido(id) {
+  return /^\d+$/.test(id);
+}
+router.use(requiereRol("administrador", "encargado"));
 
 // Columnas comunes de respuesta, con el nombre del empleado y de quien
 // registró cada fila (evita repetir el mismo SELECT/JOIN en cada ruta).
@@ -146,22 +78,38 @@ router.use(requiereRol('administrador', 'encargado'));
 // el driver no la entregue como un Date en UTC medianoche, que un navegador
 // en una zona con offset negativo (como México) mostraría corrida un día
 // atrás — el mismo bug que ya se corrigió antes para cortes_caja.fecha.
+// RF-19: además de los datos de siempre, se agrega un resumen de la ÚLTIMA
+// corrección (si tuvo alguna) vía LATERAL — el historial completo vive en
+// GET /:id/correcciones, esto es solo para mostrar un aviso discreto en la
+// lista sin tener que pedir el historial completo de cada fila.
 const SELECT_ASISTENCIA = `
   SELECT a.id, a.empleado_id, e.nombre AS empleado_nombre, e.puesto,
          to_char(a.fecha, 'YYYY-MM-DD') AS fecha,
          a.hora_entrada, a.hora_salida, a.observaciones,
-         u.nombre AS registrado_por_nombre
+         u.nombre AS registrado_por_nombre,
+         ultima_correccion.fecha_correccion AS fecha_ultima_correccion,
+         uc.nombre AS ultima_correccion_por_nombre
   FROM asistencias a
   JOIN empleados e ON e.id = a.empleado_id
   LEFT JOIN usuarios u ON u.id = a.registrado_por
+  LEFT JOIN LATERAL (
+    SELECT corregido_por, fecha_correccion
+    FROM asistencias_historial_correcciones hc
+    WHERE hc.asistencia_id = a.id
+    ORDER BY hc.fecha_correccion DESC
+    LIMIT 1
+  ) ultima_correccion ON TRUE
+  LEFT JOIN usuarios uc ON uc.id = ultima_correccion.corregido_por
 `;
 
 // GET /api/asistencias?desde=&hasta=&empleado_id=
-router.get('/', async (req, res) => {
+router.get("/", async (req, res) => {
   const { desde, hasta, empleado_id } = req.query;
 
   if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
-    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
+    return res
+      .status(400)
+      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
   }
 
   try {
@@ -171,12 +119,12 @@ router.get('/', async (req, res) => {
          AND ($2::date IS NULL OR a.fecha <= $2::date)
          AND ($3::int IS NULL OR a.empleado_id = $3::int)
        ORDER BY a.fecha DESC, a.hora_entrada DESC`,
-      [desde || null, hasta || null, empleado_id || null]
+      [desde || null, hasta || null, empleado_id || null],
     );
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error al obtener las asistencias.' });
+    res.status(500).json({ error: "Error al obtener las asistencias." });
   }
 });
 
@@ -184,37 +132,38 @@ router.get('/', async (req, res) => {
 // Las asistencias de la fecha de HOY del negocio — es lo que usa la pantalla
 // para saber, por cada empleado, si ya tiene una entrada abierta (y mostrar
 // "Marcar salida") o no (y mostrar "Marcar entrada").
-router.get('/hoy', async (req, res) => {
+router.get("/hoy", async (req, res) => {
   try {
     const resultado = await pool.query(
       `${SELECT_ASISTENCIA} WHERE a.fecha = $1::date ORDER BY a.hora_entrada DESC`,
-      [fechaHoyNegocio()]
+      [fechaHoyNegocio()],
     );
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error al obtener las asistencias de hoy.' });
+    res.status(500).json({ error: "Error al obtener las asistencias de hoy." });
   }
 });
 
 // POST /api/asistencias/entrada
 // Marca la entrada de un empleado AHORA, en la fecha de hoy del negocio.
-router.post('/entrada', async (req, res) => {
+router.post("/entrada", async (req, res) => {
   const { empleado_id, observaciones } = req.body;
 
   if (!empleado_id) {
-    return res.status(400).json({ error: 'empleado_id es obligatorio.' });
+    return res.status(400).json({ error: "empleado_id es obligatorio." });
   }
 
   try {
-    const empleado = await pool.query('SELECT id, activo FROM empleados WHERE id = $1', [
-      empleado_id,
-    ]);
+    const empleado = await pool.query(
+      "SELECT id, activo FROM empleados WHERE id = $1",
+      [empleado_id],
+    );
     if (empleado.rows.length === 0) {
-      return res.status(404).json({ error: 'Empleado no encontrado.' });
+      return res.status(404).json({ error: "Empleado no encontrado." });
     }
     if (!empleado.rows[0].activo) {
-      return res.status(400).json({ error: 'Ese empleado está desactivado.' });
+      return res.status(400).json({ error: "Ese empleado está desactivado." });
     }
 
     const hoy = fechaHoyNegocio();
@@ -222,74 +171,97 @@ router.post('/entrada', async (req, res) => {
     // No se permite una segunda entrada ABIERTA el mismo día (evita marcar
     // "entrada" dos veces sin haber marcado salida de por medio).
     const abierta = await pool.query(
-      'SELECT id FROM asistencias WHERE empleado_id = $1 AND fecha = $2 AND hora_salida IS NULL',
-      [empleado_id, hoy]
+      "SELECT id FROM asistencias WHERE empleado_id = $1 AND fecha = $2 AND hora_salida IS NULL",
+      [empleado_id, hoy],
     );
     if (abierta.rows.length > 0) {
-      return res.status(400).json({ error: 'Ese empleado ya tiene una entrada sin salida hoy.' });
+      return res
+        .status(400)
+        .json({ error: "Ese empleado ya tiene una entrada sin salida hoy." });
     }
 
     const resultado = await pool.query(
       `INSERT INTO asistencias (empleado_id, fecha, hora_entrada, registrado_por, observaciones)
        VALUES ($1, $2::date, ${horaAhoraNegocioSql()}, $3, $4)
        RETURNING id`,
-      [empleado_id, hoy, req.usuario.id, observaciones?.trim() || null]
+      [empleado_id, hoy, req.usuario.id, observaciones?.trim() || null],
     );
 
-    const fila = await pool.query(`${SELECT_ASISTENCIA} WHERE a.id = $1`, [resultado.rows[0].id]);
+    const fila = await pool.query(`${SELECT_ASISTENCIA} WHERE a.id = $1`, [
+      resultado.rows[0].id,
+    ]);
     res.status(201).json(fila.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error al registrar la entrada.' });
+    res.status(500).json({ error: "Error al registrar la entrada." });
   }
 });
 
 // PATCH /api/asistencias/:id/salida
 // Marca la salida AHORA de un registro que sigue abierto.
-router.patch('/:id/salida', async (req, res) => {
+router.patch("/:id/salida", async (req, res) => {
   const { id } = req.params;
+  if (!idValido(id)) {
+    return res.status(400).json({ error: "El id debe ser numérico." });
+  }
 
   try {
-    const actual = await pool.query('SELECT * FROM asistencias WHERE id = $1', [id]);
+    const actual = await pool.query("SELECT * FROM asistencias WHERE id = $1", [
+      id,
+    ]);
     if (actual.rows.length === 0) {
-      return res.status(404).json({ error: 'Registro de asistencia no encontrado.' });
+      return res
+        .status(404)
+        .json({ error: "Registro de asistencia no encontrado." });
     }
     if (actual.rows[0].hora_salida) {
-      return res.status(400).json({ error: 'Ese registro ya tiene hora de salida.' });
+      return res
+        .status(400)
+        .json({ error: "Ese registro ya tiene hora de salida." });
     }
 
     await pool.query(
       `UPDATE asistencias SET hora_salida = ${horaAhoraNegocioSql()} WHERE id = $1`,
-      [id]
+      [id],
     );
     const fila = await pool.query(`${SELECT_ASISTENCIA} WHERE a.id = $1`, [id]);
     res.json(fila.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error al registrar la salida.' });
+    res.status(500).json({ error: "Error al registrar la salida." });
   }
 });
 
 // POST /api/asistencias
 // Captura manual completa (ej. para un día que no se marcó en vivo). A
 // diferencia de /entrada, aquí SÍ se puede mandar una fecha distinta a hoy.
-router.post('/', async (req, res) => {
-  const { empleado_id, fecha, hora_entrada, hora_salida, observaciones } = req.body;
+router.post("/", async (req, res) => {
+  const { empleado_id, fecha, hora_entrada, hora_salida, observaciones } =
+    req.body;
 
   if (!empleado_id || !fecha) {
-    return res.status(400).json({ error: 'empleado_id y fecha son obligatorios.' });
+    return res
+      .status(400)
+      .json({ error: "empleado_id y fecha son obligatorios." });
   }
   if (!fechaValida(fecha)) {
-    return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+    return res
+      .status(400)
+      .json({ error: "La fecha debe tener el formato AAAA-MM-DD." });
   }
   if (hora_entrada && hora_salida && hora_salida <= hora_entrada) {
-    return res.status(400).json({ error: 'La hora de salida debe ser posterior a la de entrada.' });
+    return res
+      .status(400)
+      .json({ error: "La hora de salida debe ser posterior a la de entrada." });
   }
 
   try {
-    const empleado = await pool.query('SELECT id FROM empleados WHERE id = $1', [empleado_id]);
+    const empleado = await pool.query(
+      "SELECT id FROM empleados WHERE id = $1",
+      [empleado_id],
+    );
     if (empleado.rows.length === 0) {
-      return res.status(404).json({ error: 'Empleado no encontrado.' });
+      return res.status(404).json({ error: "Empleado no encontrado." });
     }
 
     const resultado = await pool.query(
@@ -303,53 +275,208 @@ router.post('/', async (req, res) => {
         hora_salida || null,
         req.usuario.id,
         observaciones?.trim() || null,
-      ]
+      ],
     );
-    const fila = await pool.query(`${SELECT_ASISTENCIA} WHERE a.id = $1`, [resultado.rows[0].id]);
+    const fila = await pool.query(`${SELECT_ASISTENCIA} WHERE a.id = $1`, [
+      resultado.rows[0].id,
+    ]);
     res.status(201).json(fila.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error al registrar la asistencia.' });
+    res.status(500).json({ error: "Error al registrar la asistencia." });
   }
 });
 
 // PATCH /api/asistencias/:id
 // Corrige un registro ya existente (edición parcial: lo que no llega
-// conserva su valor actual).
-router.patch('/:id', async (req, res) => {
+// conserva su valor actual). RF-19: si algún campo de verdad cambia, se
+// guarda una fila en asistencias_historial_correcciones con el valor que
+// tenía ANTES — en la misma transacción que el UPDATE, para que una no
+// pueda quedar sin la otra.
+router.patch("/:id", async (req, res) => {
   const { id } = req.params;
+  if (!idValido(id)) {
+    return res.status(400).json({ error: "El id debe ser numérico." });
+  }
   const { fecha, hora_entrada, hora_salida, observaciones } = req.body;
 
+  const client = await pool.connect();
   try {
-    const actual = await pool.query('SELECT * FROM asistencias WHERE id = $1', [id]);
+    const actual = await client.query(
+      "SELECT * FROM asistencias WHERE id = $1",
+      [id],
+    );
     if (actual.rows.length === 0) {
-      return res.status(404).json({ error: 'Registro de asistencia no encontrado.' });
+      client.release();
+      return res
+        .status(404)
+        .json({ error: "Registro de asistencia no encontrado." });
     }
     const actualFila = actual.rows[0];
 
-    const nuevaFecha = fecha || actualFila.fecha;
+    // to_char() ya deja actualFila.fecha como texto AAAA-MM-DD cuando viene
+    // de SELECT_ASISTENCIA, pero aquí es un SELECT * crudo: actualFila.fecha
+    // es un objeto Date (medianoche UTC) — se convierte a texto antes de
+    // cualquier comparación o reasignación, para no confundir un cambio
+    // real con solo una diferencia de formato.
+    const fechaAnteriorTexto = actualFila.fecha.toISOString().slice(0, 10);
+
+    const nuevaFecha = fecha || fechaAnteriorTexto;
     if (fecha && !fechaValida(fecha)) {
-      return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+      client.release();
+      return res
+        .status(400)
+        .json({ error: "La fecha debe tener el formato AAAA-MM-DD." });
     }
-    const nuevaEntrada = hora_entrada !== undefined ? hora_entrada || null : actualFila.hora_entrada;
-    const nuevaSalida = hora_salida !== undefined ? hora_salida || null : actualFila.hora_salida;
+    const nuevaEntrada =
+      hora_entrada !== undefined
+        ? hora_entrada || null
+        : actualFila.hora_entrada;
+    const nuevaSalida =
+      hora_salida !== undefined ? hora_salida || null : actualFila.hora_salida;
     if (nuevaEntrada && nuevaSalida && nuevaSalida <= nuevaEntrada) {
-      return res.status(400).json({ error: 'La hora de salida debe ser posterior a la de entrada.' });
+      client.release();
+      return res.status(400).json({
+        error: "La hora de salida debe ser posterior a la de entrada.",
+      });
     }
     const nuevasObservaciones =
-      observaciones !== undefined ? observaciones?.trim() || null : actualFila.observaciones;
+      observaciones !== undefined
+        ? observaciones?.trim() || null
+        : actualFila.observaciones;
 
-    await pool.query(
+    // Las horas pueden llegar como "HH:MM" (del formulario) o ya estar en la
+    // base como "HH:MM:SS" — se comparan solo los primeros 5 caracteres para
+    // no detectar un "cambio" donde solo cambió el formato.
+    const normalizarHora = (h) => (h ? h.slice(0, 5) : null);
+    const huboCambio =
+      nuevaFecha !== fechaAnteriorTexto ||
+      normalizarHora(nuevaEntrada) !==
+        normalizarHora(actualFila.hora_entrada) ||
+      normalizarHora(nuevaSalida) !== normalizarHora(actualFila.hora_salida) ||
+      nuevasObservaciones !== actualFila.observaciones;
+
+    await client.query("BEGIN");
+
+    if (huboCambio) {
+      await client.query(
+        `INSERT INTO asistencias_historial_correcciones
+           (asistencia_id, corregido_por, fecha_anterior, hora_entrada_anterior,
+            hora_salida_anterior, observaciones_anteriores)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          id,
+          req.usuario.id,
+          fechaAnteriorTexto,
+          actualFila.hora_entrada,
+          actualFila.hora_salida,
+          actualFila.observaciones,
+        ],
+      );
+    }
+
+    await client.query(
       `UPDATE asistencias
        SET fecha = $1, hora_entrada = $2, hora_salida = $3, observaciones = $4
        WHERE id = $5`,
-      [nuevaFecha, nuevaEntrada, nuevaSalida, nuevasObservaciones, id]
+      [nuevaFecha, nuevaEntrada, nuevaSalida, nuevasObservaciones, id],
     );
-    const fila = await pool.query(`${SELECT_ASISTENCIA} WHERE a.id = $1`, [id]);
+
+    await client.query("COMMIT");
+
+    const fila = await client.query(`${SELECT_ASISTENCIA} WHERE a.id = $1`, [
+      id,
+    ]);
     res.json(fila.rows[0]);
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error(error);
-    res.status(500).json({ error: 'Error al corregir la asistencia.' });
+    res.status(500).json({ error: "Error al corregir la asistencia." });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/asistencias/:id/correcciones
+// RF-19: historial completo de correcciones de UN registro (más reciente
+// primero) — quién corrigió, cuándo, y qué valor tenía cada campo antes.
+router.get("/:id/correcciones", async (req, res) => {
+  const { id } = req.params;
+  if (!idValido(id)) {
+    return res.status(400).json({ error: "El id debe ser numérico." });
+  }
+  try {
+    const resultado = await pool.query(
+      `SELECT hc.id, hc.fecha_correccion, u.nombre AS corregido_por_nombre,
+              to_char(hc.fecha_anterior, 'YYYY-MM-DD') AS fecha_anterior,
+              hc.hora_entrada_anterior, hc.hora_salida_anterior,
+              hc.observaciones_anteriores
+       FROM asistencias_historial_correcciones hc
+       JOIN usuarios u ON u.id = hc.corregido_por
+       WHERE hc.asistencia_id = $1
+       ORDER BY hc.fecha_correccion DESC`,
+      [id],
+    );
+    res.json(resultado.rows);
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ error: "Error al obtener el historial de correcciones." });
+  }
+});
+
+// GET /api/asistencias/retardos?desde=&hasta=&empleado_id=
+// RF-20: asistencias cuya hora_entrada real llegó DESPUÉS de la hora
+// esperada de ese día — excepción de fecha (si existe y es 'trabaja') o,
+// si no hay excepción, el horario recurrente de ese día de la semana. Un
+// día sin excepción 'trabaja' y sin horario recurrente no tiene hora
+// esperada: no puede ser "retardo" (no hay contra qué comparar). Sin
+// margen de tolerancia: cualquier minuto tarde cuenta (decisión del
+// usuario, 2026-10-13).
+router.get("/retardos", async (req, res) => {
+  const { desde, hasta, empleado_id } = req.query;
+
+  if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
+    return res
+      .status(400)
+      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+  }
+
+  try {
+    const resultado = await pool.query(
+      `SELECT a.id, a.empleado_id, e.nombre AS empleado_nombre,
+              to_char(a.fecha, 'YYYY-MM-DD') AS fecha,
+              a.hora_entrada,
+              CASE WHEN he.id IS NOT NULL THEN he.hora_entrada ELSE h.hora_entrada END AS hora_esperada,
+              ROUND(
+                EXTRACT(EPOCH FROM (
+                  a.hora_entrada - (CASE WHEN he.id IS NOT NULL THEN he.hora_entrada ELSE h.hora_entrada END)
+                )) / 60
+              )::int AS minutos_retardo
+       FROM asistencias a
+       JOIN empleados e ON e.id = a.empleado_id
+       LEFT JOIN horario_excepciones he ON he.empleado_id = a.empleado_id AND he.fecha = a.fecha
+       LEFT JOIN horarios h ON h.empleado_id = a.empleado_id
+         AND h.dia_semana = (ARRAY['domingo','lunes','martes','miercoles','jueves','viernes','sabado'])[EXTRACT(DOW FROM a.fecha)::int + 1]
+       WHERE a.hora_entrada IS NOT NULL
+         AND ($1::date IS NULL OR a.fecha >= $1::date)
+         AND ($2::date IS NULL OR a.fecha <= $2::date)
+         AND ($3::int IS NULL OR a.empleado_id = $3::int)
+         AND (
+           CASE
+             WHEN he.id IS NOT NULL THEN he.tipo = 'trabaja' AND a.hora_entrada > he.hora_entrada
+             WHEN h.id IS NOT NULL THEN a.hora_entrada > h.hora_entrada
+             ELSE FALSE
+           END
+         )
+       ORDER BY a.fecha DESC, a.hora_entrada DESC`,
+      [desde || null, hasta || null, empleado_id || null],
+    );
+    res.json(resultado.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Error al calcular los retardos." });
   }
 });
 
