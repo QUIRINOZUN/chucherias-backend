@@ -42,6 +42,20 @@ CREATE TABLE asistencias (
     observaciones   VARCHAR(255)
 );
 
+-- RF-19 (2026-10-13): evidencia automática de cada corrección de un
+-- registro de asistencia — quién corrigió, cuándo, y el valor que tenía
+-- antes. Una fila por corrección (no solo la última).
+CREATE TABLE asistencias_historial_correcciones (
+    id                       SERIAL PRIMARY KEY,
+    asistencia_id            INTEGER NOT NULL REFERENCES asistencias(id) ON DELETE CASCADE,
+    corregido_por            INTEGER NOT NULL REFERENCES usuarios(id),
+    fecha_correccion         TIMESTAMP NOT NULL DEFAULT NOW(),
+    fecha_anterior           DATE NOT NULL,
+    hora_entrada_anterior    TIME,
+    hora_salida_anterior     TIME,
+    observaciones_anteriores TEXT
+);
+
 -- Horario SEMANAL recurrente por empleado (Sprint 3): una fila por cada día
 -- de la semana que trabaja (sin fila = libre ese día). No tiene fecha propia
 -- -- se repite cada semana hasta que alguien lo edite. Sirve hoy para que el
@@ -102,12 +116,26 @@ CREATE TABLE variantes_producto (
     precio       NUMERIC(10,2) NOT NULL,
     -- 2026-10-09: deshabilitar UNA presentación sin ocultar todo el producto
     -- (ej. "Paquete #3" agotado) — mismo patrón que productos.activo.
-    activo       BOOLEAN NOT NULL DEFAULT TRUE
+    activo       BOOLEAN NOT NULL DEFAULT TRUE,
+    -- RNF-02 (2026-10-16): quién cambió el precio/nombre de esta variante y
+    -- cuándo — "cambios de precio" es una de las operaciones críticas que
+    -- el requisito exige auditar explícitamente.
+    editado_por    INTEGER REFERENCES usuarios(id),
+    fecha_edicion  TIMESTAMP
 );
 
 CREATE TABLE recetas (
     id           SERIAL PRIMARY KEY,
-    variante_id  INTEGER NOT NULL UNIQUE REFERENCES variantes_producto(id)
+    variante_id  INTEGER NOT NULL UNIQUE REFERENCES variantes_producto(id),
+    -- 2026-10-12: foto de referencia "así debe quedar" para quien prepara
+    -- el platillo (distinta de productos.imagen_url, que es la del menú).
+    imagen_url        VARCHAR(255),
+    imagen_public_id  VARCHAR(255),
+    -- RNF-02 (2026-10-16): "modificación de recetas" es otra de las
+    -- operaciones críticas que el requisito exige auditar — quién
+    -- reemplazó por última vez los insumos/el tutorial, y cuándo.
+    editado_por    INTEGER REFERENCES usuarios(id),
+    fecha_edicion  TIMESTAMP
 );
 
 -- ===================== PROVEEDORES E INVENTARIO =====================
@@ -132,7 +160,13 @@ CREATE TABLE insumos (
     unidad_medida     VARCHAR(20) NOT NULL,   -- g, kg, ml, l, pieza, porcion
     categoria_id      INTEGER REFERENCES categorias_insumo(id),
     cantidad_minima   NUMERIC(10,2) NOT NULL DEFAULT 0,
-    proveedor_id      INTEGER REFERENCES proveedores(id)
+    proveedor_id      INTEGER REFERENCES proveedores(id),
+    -- RF-16 (2026-10-13): cargo fijo cuando este insumo se elige como una
+    -- opción con costo (ej. "cacahuate diferente" +$5) — NULL = sin cargo.
+    -- El servidor ya resuelve cada insumo "elegido" por nombre (routes/
+    -- ventas.js), así que este campo nunca depende de un precio enviado por
+    -- el cliente.
+    costo_extra       NUMERIC(10,2)
 );
 
 CREATE TABLE receta_insumos (
@@ -191,7 +225,13 @@ CREATE TABLE ordenes (
                    CHECK (estado IN ('sin_preparar','preparando','por_entregar','entregado','cancelada')),
     fecha_creacion TIMESTAMP NOT NULL DEFAULT NOW(),
     creado_por     INTEGER NOT NULL REFERENCES usuarios(id),
-    repartidor_id  INTEGER REFERENCES empleados(id)
+    repartidor_id  INTEGER REFERENCES empleados(id),
+    -- 2026-10-11/12: nombre, dirección y teléfono del cliente, SOLO para
+    -- tipo_entrega = 'domicilio' (NULL en presencial) — ver routes/ventas.js,
+    -- validación al registrar la venta.
+    cliente_nombre     VARCHAR(150),
+    cliente_direccion  VARCHAR(255),
+    cliente_telefono   VARCHAR(20)
 );
 
 -- Renglones de una orden: qué variante, cuántas y a qué precio. precio_unitario
@@ -221,12 +261,15 @@ CREATE TABLE orden_detalle (
 -- esta tabla es la que usa el descuento automático (ver routes/ordenes.js,
 -- PATCH /:id/estado al pasar a 'preparando').
 CREATE TABLE orden_detalle_insumos (
-    id                SERIAL PRIMARY KEY,
-    orden_detalle_id  INTEGER NOT NULL REFERENCES orden_detalle(id),
-    insumo_id         INTEGER NOT NULL REFERENCES insumos(id),
-    tipo              VARCHAR(10) NOT NULL CHECK (tipo IN ('quitado', 'elegido')),
-    cantidad          NUMERIC(10,2),  -- solo 'elegido'; 'quitado' es binario
-    unidad_medida     VARCHAR(20)
+    id                     SERIAL PRIMARY KEY,
+    orden_detalle_id       INTEGER NOT NULL REFERENCES orden_detalle(id),
+    insumo_id              INTEGER NOT NULL REFERENCES insumos(id),
+    tipo                   VARCHAR(10) NOT NULL CHECK (tipo IN ('quitado', 'elegido')),
+    cantidad               NUMERIC(10,2),  -- solo 'elegido'; 'quitado' es binario
+    unidad_medida          VARCHAR(20),
+    -- RF-16 (2026-10-13): cargo extra ya congelado (insumos.costo_extra × la
+    -- cantidad del producto en esa línea), NULL si esa opción no tenía costo.
+    costo_extra_aplicado   NUMERIC(10,2)
 );
 
 -- `orden_id` liga una salida (descuento por receta, al pasar a 'preparando')
@@ -277,7 +320,11 @@ CREATE TABLE lealtad_historial (
     venta_id      INTEGER REFERENCES ventas(id),
     tipo_evento   VARCHAR(20) NOT NULL CHECK (tipo_evento IN ('visita','descuento_aplicado')),
     descripcion   VARCHAR(255),
-    fecha         TIMESTAMP NOT NULL DEFAULT NOW()
+    fecha         TIMESTAMP NOT NULL DEFAULT NOW(),
+    -- RF-23 (2026-10-16): número de visita del ciclo (solo en filas
+    -- tipo_evento='visita') — permite revertir la visita/descuento exacto
+    -- al cancelar la venta que la generó, sin parsear `descripcion`.
+    visita_numero INTEGER
 );
 
 -- ===================== MERMAS Y CAJA =====================
@@ -346,6 +393,30 @@ CREATE TABLE movimientos_caja (
 );
 CREATE INDEX idx_movimientos_caja_orden ON movimientos_caja(orden_id);
 
+-- ===================== CHECKLIST DE APERTURA/CIERRE =====================
+-- Entrevista con la titular ("Preguntas de cierre y priorización" #12):
+-- "El checklist de apertura y cierre (gas, luces, limpieza); aunque parece
+-- sencillo, es clave para la operación diaria." `checklist_items` es el
+-- catálogo (editable desde la app); `checklist_marcas` es qué se marcó HOY
+-- de ese catálogo — sin fila = todavía no se hizo.
+
+CREATE TABLE checklist_items (
+    id          SERIAL PRIMARY KEY,
+    tipo        VARCHAR(10) NOT NULL CHECK (tipo IN ('apertura', 'cierre')),
+    descripcion VARCHAR(150) NOT NULL,
+    orden       INTEGER NOT NULL DEFAULT 0,
+    activo      BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE checklist_marcas (
+    id            SERIAL PRIMARY KEY,
+    item_id       INTEGER NOT NULL REFERENCES checklist_items(id),
+    fecha         DATE NOT NULL,
+    marcado_por   INTEGER NOT NULL REFERENCES usuarios(id),
+    fecha_marcado TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (item_id, fecha)
+);
+
 -- ===================== ÍNDICES RECOMENDADOS =====================
 
 CREATE INDEX idx_ordenes_estado ON ordenes(estado);
@@ -358,8 +429,22 @@ CREATE INDEX idx_mermas_orden ON mermas(orden_id);
 CREATE INDEX idx_mermas_fecha ON mermas(fecha);
 CREATE INDEX idx_orden_detalle_insumos_detalle ON orden_detalle_insumos(orden_detalle_id);
 CREATE INDEX idx_lealtad_cliente ON lealtad_historial(cliente_id);
+CREATE INDEX idx_checklist_marcas_fecha ON checklist_marcas(fecha);
 
 -- ===================== DATOS INICIALES (SEED) =====================
 
 INSERT INTO roles (nombre) VALUES
   ('administrador'), ('encargado'), ('cajero'), ('auxiliar');
+
+-- Checklist inicial, tal como lo describió la titular en la entrevista.
+INSERT INTO checklist_items (tipo, descripcion, orden) VALUES
+  ('apertura', 'Encender las luces', 1),
+  ('apertura', 'Poner el gas', 2),
+  ('apertura', 'Abrir el establecimiento', 3),
+  ('apertura', 'Alistar el área de preparación y la vitrina', 4),
+  ('apertura', 'Revisar el inventario del día', 5),
+  ('cierre', 'Apagar y cortar el gas', 1),
+  ('cierre', 'Hacer limpieza general', 2),
+  ('cierre', 'Sacar la basura y los desperdicios', 3),
+  ('cierre', 'Hacer el corte de caja', 4),
+  ('cierre', 'Apagar las luces', 5);

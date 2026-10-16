@@ -38,19 +38,36 @@
 // scripts/seed-recetas.js) no descuenta nada — no bloquea el avance de la
 // comanda, solo no descuenta.
 //
+// DECISIÓN DE DISEÑO (revisado 2026-10-16): RF-10 y la entrevista con la
+// titular ("¿El inventario debe descontarse al registrar la venta, al
+// comenzar la preparación o al terminarla?") piden textualmente "al
+// momento de registrar la venta". Aquí se implementó deliberadamente al
+// entrar a 'preparando' en su lugar, por una razón operativa real: una
+// orden tarda entre 10 y 50 minutos en cocina (la misma entrevista,
+// sección "Ventas y punto de venta") y puede cancelarse ANTES de empezar
+// a prepararse. Descontar al registrar la venta habría consumido insumos
+// por algo que nunca llegó a cocinarse, obligando a restituir en el caso
+// MÁS común de cancelación (orden todavía 'sin_preparar') — justo lo que
+// RF-11 ya resuelve para cuando sí hace falta (orden ya 'preparando').
+// Descontar al entrar a cocina refleja el consumo real de insumos con más
+// fidelidad que la redacción literal del requisito. No se cambió este
+// comportamiento (ya probado extensamente) — se documenta la justificación
+// aquí porque antes de esta revisión no existía ninguna nota que explicara
+// por qué se desvía de lo que pide RF-10 tal cual.
+//
 // TIEMPO POR ESTADO (RF-08): cada cambio de estado cierra el renglón abierto
 // de `orden_estado_historial` (fecha_fin = NOW()) y abre uno nuevo para el
 // estado al que acaba de entrar. Así queda registrado cuánto duró cada paso,
 // consultable en GET /:id/tiempos.
 // =============================================================================
-const express = require('express');
-const pool = require('../db');
-const { verificarToken, requiereRol } = require('../middleware/auth');
+const express = require("express");
+const pool = require("../db");
+const { verificarToken, requiereRol } = require("../middleware/auth");
 const {
   calcularInsumosDeOrden,
   calcularInsumosDeLineas,
   registrarMovimientosInventario,
-} = require('../utils/inventarioOrden');
+} = require("../utils/inventarioOrden");
 
 const router = express.Router();
 
@@ -59,33 +76,47 @@ router.use(verificarToken);
 // Quién puede qué (Sprint 2): las comandas las ve todo el personal de
 // operación (incluido el cajero, solo lectura), pero solo administrador,
 // encargado y auxiliar (cocina) pueden avanzarlas de estado.
-const ROLES_QUE_VEN = ['administrador', 'encargado', 'cajero', 'auxiliar'];
-const ROLES_QUE_AVANZAN = ['administrador', 'encargado', 'auxiliar'];
+const ROLES_QUE_VEN = ["administrador", "encargado", "cajero", "auxiliar"];
+const ROLES_QUE_AVANZAN = ["administrador", "encargado", "auxiliar"];
+// Asignar repartidor es una decisión de mostrador/logística, no de cocina —
+// mismos roles que ya pueden registrar una venta (routes/ventas.js), no el
+// auxiliar.
+const ROLES_QUE_ASIGNAN_REPARTIDOR = ["administrador", "encargado", "cajero"];
 
 // El flujo de una comanda avanza en un solo sentido; 'cancelada' se maneja
 // aparte, a través de la cancelación de la venta.
 // El orden del arreglo ES el orden del flujo: el "siguiente" estado de uno es
 // el elemento que le sigue.
-const SECUENCIA_ESTADOS = ['sin_preparar', 'preparando', 'por_entregar', 'entregado'];
+const SECUENCIA_ESTADOS = [
+  "sin_preparar",
+  "preparando",
+  "por_entregar",
+  "entregado",
+];
 
 // GET /api/ordenes?estado=sin_preparar,preparando
 // Lista órdenes con sus productos, para el tablero de comandas. Sin filtro,
 // devuelve solo las órdenes activas (no entregadas ni canceladas).
 // Las más antiguas salen primero: son las que llevan más tiempo esperando.
-router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
+router.get("/", requiereRol(...ROLES_QUE_VEN), async (req, res) => {
   // `estado` llega como texto separado por comas: "sin_preparar,preparando".
   const estadosSolicitados = req.query.estado
-    ? String(req.query.estado).split(',').map((e) => e.trim())
-    : ['sin_preparar', 'preparando', 'por_entregar'];
+    ? String(req.query.estado)
+        .split(",")
+        .map((e) => e.trim())
+    : ["sin_preparar", "preparando", "por_entregar"];
 
   try {
     // Consulta 1: las órdenes en los estados pedidos (más antiguas primero).
     const ordenes = await pool.query(
-      `SELECT o.id, o.numero_orden, o.estado, o.tipo_entrega, o.fecha_creacion
+      `SELECT o.id, o.numero_orden, o.estado, o.tipo_entrega, o.fecha_creacion,
+              o.cliente_nombre, o.cliente_direccion, o.cliente_telefono,
+              o.repartidor_id, e.nombre AS repartidor_nombre
        FROM ordenes o
+       LEFT JOIN empleados e ON e.id = o.repartidor_id
        WHERE o.estado = ANY($1::varchar[])
        ORDER BY o.fecha_creacion ASC`,
-      [estadosSolicitados]
+      [estadosSolicitados],
     );
 
     if (ordenes.rows.length === 0) {
@@ -102,7 +133,7 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
        JOIN variantes_producto vp ON vp.id = od.variante_id
        JOIN productos p ON p.id = vp.producto_id
        WHERE od.orden_id = ANY($1::int[])`,
-      [ordenIds]
+      [ordenIds],
     );
 
     // Se agrupan los renglones por orden: { orden_id: [item, item, …] }.
@@ -129,7 +160,7 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
     res.json(resultado);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error al obtener las órdenes.' });
+    res.status(500).json({ error: "Error al obtener las órdenes." });
   }
 });
 
@@ -141,94 +172,168 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
 // Se hace en una transacción porque el paso a 'preparando' también escribe
 // el descuento de inventario (ver cabecera del archivo): o se mueve la
 // comanda Y se descuenta, o no se mueve nada.
-router.patch('/:id/estado', requiereRol(...ROLES_QUE_AVANZAN), async (req, res) => {
-  const { id } = req.params;
-  const { estado: estadoSolicitado } = req.body;
+router.patch(
+  "/:id/estado",
+  requiereRol(...ROLES_QUE_AVANZAN),
+  async (req, res) => {
+    const { id } = req.params;
+    const { estado: estadoSolicitado } = req.body;
 
-  const client = await pool.connect();
+    const client = await pool.connect();
 
-  try {
-    await client.query('BEGIN');
+    try {
+      await client.query("BEGIN");
 
-    const ordenActual = await client.query(
-      'SELECT estado, numero_orden FROM ordenes WHERE id = $1 FOR UPDATE',
-      [id]
-    );
-    if (ordenActual.rows.length === 0) {
-      throw { status: 404, mensaje: 'La orden no existe.' };
-    }
+      const ordenActual = await client.query(
+        "SELECT estado, numero_orden FROM ordenes WHERE id = $1 FOR UPDATE",
+        [id],
+      );
+      if (ordenActual.rows.length === 0) {
+        throw { status: 404, mensaje: "La orden no existe." };
+      }
 
-    const { estado: estadoActual, numero_orden: numeroOrden } = ordenActual.rows[0];
-    const indiceActual = SECUENCIA_ESTADOS.indexOf(estadoActual);
+      const { estado: estadoActual, numero_orden: numeroOrden } =
+        ordenActual.rows[0];
+      const indiceActual = SECUENCIA_ESTADOS.indexOf(estadoActual);
 
-    // Una orden 'cancelada' no está en la secuencia (índice -1): ya no se mueve.
-    if (indiceActual === -1) {
-      throw { status: 409, mensaje: `La orden está en estado "${estadoActual}" y ya no se puede avanzar.` };
-    }
+      // Una orden 'cancelada' no está en la secuencia (índice -1): ya no se mueve.
+      if (indiceActual === -1) {
+        throw {
+          status: 409,
+          mensaje: `La orden está en estado "${estadoActual}" y ya no se puede avanzar.`,
+        };
+      }
 
-    // El único estado permitido es el que sigue en la secuencia. Si la orden
-    // ya está 'entregado' no hay siguiente y también se rechaza.
-    const siguienteEstado = SECUENCIA_ESTADOS[indiceActual + 1];
-    if (!siguienteEstado || estadoSolicitado !== siguienteEstado) {
-      throw {
-        status: 400,
-        mensaje: `Desde "${estadoActual}" solo se puede avanzar a "${siguienteEstado || '(ninguno, ya está entregada)'}".`,
-      };
-    }
+      // El único estado permitido es el que sigue en la secuencia. Si la orden
+      // ya está 'entregado' no hay siguiente y también se rechaza.
+      const siguienteEstado = SECUENCIA_ESTADOS[indiceActual + 1];
+      if (!siguienteEstado || estadoSolicitado !== siguienteEstado) {
+        throw {
+          status: 400,
+          mensaje: `Desde "${estadoActual}" solo se puede avanzar a "${siguienteEstado || "(ninguno, ya está entregada)"}".`,
+        };
+      }
 
-    // La condición sobre el estado actual evita que dos personas (o dos
-    // toques seguidos) avancen la misma comanda dos pasos: solo gana una.
-    // (El FOR UPDATE de arriba ya bloqueó la fila, así que esto no debería
-    // fallar por una carrera, pero se deja como segundo seguro.)
-    const resultado = await client.query(
-      'UPDATE ordenes SET estado = $1 WHERE id = $2 AND estado = $3 RETURNING *',
-      [siguienteEstado, id, estadoActual]
-    );
+      // La condición sobre el estado actual evita que dos personas (o dos
+      // toques seguidos) avancen la misma comanda dos pasos: solo gana una.
+      // (El FOR UPDATE de arriba ya bloqueó la fila, así que esto no debería
+      // fallar por una carrera, pero se deja como segundo seguro.)
+      const resultado = await client.query(
+        "UPDATE ordenes SET estado = $1 WHERE id = $2 AND estado = $3 RETURNING *",
+        [siguienteEstado, id, estadoActual],
+      );
 
-    if (resultado.rows.length === 0) {
-      throw { status: 409, mensaje: 'La orden ya cambió de estado. Se actualizó el tablero.' };
-    }
+      if (resultado.rows.length === 0) {
+        throw {
+          status: 409,
+          mensaje: "La orden ya cambió de estado. Se actualizó el tablero.",
+        };
+      }
 
-    // Descuento de inventario: solo al ENTRAR a 'preparando' (no al salir de
-    // ahí en pasos posteriores). Como sin_preparar->preparando es la única
-    // forma de llegar a 'preparando', esto corre una sola vez por orden.
-    if (siguienteEstado === 'preparando') {
-      await descontarInventario(client, id, numeroOrden, req.usuario.id);
-    }
+      // Descuento de inventario: solo al ENTRAR a 'preparando' (no al salir de
+      // ahí en pasos posteriores). Como sin_preparar->preparando es la única
+      // forma de llegar a 'preparando', esto corre una sola vez por orden.
+      if (siguienteEstado === "preparando") {
+        await descontarInventario(client, id, numeroOrden, req.usuario.id);
+      }
 
-    // RF-08: se cierra el renglón de historial del estado que se deja
-    // (fecha_fin = NOW()) y se abre uno nuevo para el estado al que se entra.
-    await client.query(
-      `UPDATE orden_estado_historial SET fecha_fin = NOW() WHERE orden_id = $1 AND fecha_fin IS NULL`,
-      [id]
-    );
-    await client.query(
-      `INSERT INTO orden_estado_historial (orden_id, estado, fecha_inicio, responsable_id)
+      // RF-08: se cierra el renglón de historial del estado que se deja
+      // (fecha_fin = NOW()) y se abre uno nuevo para el estado al que se entra.
+      await client.query(
+        `UPDATE orden_estado_historial SET fecha_fin = NOW() WHERE orden_id = $1 AND fecha_fin IS NULL`,
+        [id],
+      );
+      await client.query(
+        `INSERT INTO orden_estado_historial (orden_id, estado, fecha_inicio, responsable_id)
        VALUES ($1, $2, NOW(), $3)`,
-      [id, siguienteEstado, req.usuario.id]
-    );
+        [id, siguienteEstado, req.usuario.id],
+      );
 
-    await client.query('COMMIT');
-    res.json(resultado.rows[0]);
-  } catch (error) {
-    await client.query('ROLLBACK');
-    if (error.status) {
-      return res.status(error.status).json({ error: error.mensaje });
+      await client.query("COMMIT");
+      res.json(resultado.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error.status) {
+        return res.status(error.status).json({ error: error.mensaje });
+      }
+      console.error(error);
+      res
+        .status(500)
+        .json({ error: "Error al actualizar el estado de la orden." });
+    } finally {
+      client.release();
     }
-    console.error(error);
-    res.status(500).json({ error: 'Error al actualizar el estado de la orden.' });
-  } finally {
-    client.release();
-  }
-});
+  },
+);
+
+// PATCH /api/ordenes/:id/repartidor
+// Asigna o cambia el repartidor de una orden A DOMICILIO (entrevista: "nombre
+// del repartidor" es parte de la información que debe llevar la orden). Se
+// puede asignar desde el cobro (POST /api/ventas) o corregir/asignar después
+// desde aquí, para cuando todavía no se sabe quién la va a llevar al momento
+// de cobrar. Cuerpo: { repartidor_id: number | null } — null quita la
+// asignación (ej. se equivocaron de repartidor).
+router.patch(
+  "/:id/repartidor",
+  requiereRol(...ROLES_QUE_ASIGNAN_REPARTIDOR),
+  async (req, res) => {
+    const { id } = req.params;
+    const { repartidor_id } = req.body;
+
+    try {
+      const orden = await pool.query(
+        "SELECT tipo_entrega FROM ordenes WHERE id = $1",
+        [id],
+      );
+      if (orden.rows.length === 0) {
+        return res.status(404).json({ error: "La orden no existe." });
+      }
+      if (orden.rows[0].tipo_entrega !== "domicilio") {
+        return res
+          .status(400)
+          .json({
+            error: "Solo las órdenes a domicilio llevan repartidor asignado.",
+          });
+      }
+
+      if (repartidor_id !== null) {
+        const empleado = await pool.query(
+          `SELECT 1 FROM empleados WHERE id = $1 AND activo = TRUE AND puesto ILIKE '%repartidor%'`,
+          [repartidor_id],
+        );
+        if (empleado.rows.length === 0) {
+          return res
+            .status(400)
+            .json({
+              error: "El repartidor seleccionado no existe o no está activo.",
+            });
+        }
+      }
+
+      const resultado = await pool.query(
+        "UPDATE ordenes SET repartidor_id = $1 WHERE id = $2 RETURNING id, repartidor_id",
+        [repartidor_id, id],
+      );
+      res.json(resultado.rows[0]);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Error al asignar el repartidor." });
+    }
+  },
+);
 
 // Expande la receta de la orden (utils/inventarioOrden.js) y registra una
 // SALIDA en movimientos_inventario por cada insumo, ligada a la orden para
 // poder revertirla si la venta se cancela después (RF-11).
-async function descontarInventario(client, ordenId, numeroOrden, responsableId) {
+async function descontarInventario(
+  client,
+  ordenId,
+  numeroOrden,
+  responsableId,
+) {
   const insumos = await calcularInsumosDeOrden(client, ordenId);
   await registrarMovimientosInventario(client, insumos, {
-    tipo: 'salida',
+    tipo: "salida",
     responsableId,
     motivo: `Venta ${numeroOrden}`,
     ordenId,
@@ -242,23 +347,29 @@ async function descontarInventario(client, ordenId, numeroOrden, responsableId) 
 // del estado actual (fecha_fin todavía NULL) se calcula contra NOW().
 // Mismo criterio de permisos que el resto de la información financiera/de
 // reportes (GET /api/ventas, /api/caja/cortes): administrador y encargado.
-router.get('/:id/tiempos', requiereRol('administrador', 'encargado'), async (req, res) => {
-  const { id } = req.params;
-  try {
-    const resultado = await pool.query(
-      `SELECT estado, fecha_inicio, fecha_fin,
+router.get(
+  "/:id/tiempos",
+  requiereRol("administrador", "encargado"),
+  async (req, res) => {
+    const { id } = req.params;
+    try {
+      const resultado = await pool.query(
+        `SELECT estado, fecha_inicio, fecha_fin,
               EXTRACT(EPOCH FROM (COALESCE(fecha_fin, NOW()) - fecha_inicio))::int AS duracion_segundos
        FROM orden_estado_historial
        WHERE orden_id = $1
        ORDER BY fecha_inicio ASC`,
-      [id]
-    );
-    res.json(resultado.rows);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al obtener los tiempos de la orden.' });
-  }
-});
+        [id],
+      );
+      res.json(resultado.rows);
+    } catch (error) {
+      console.error(error);
+      res
+        .status(500)
+        .json({ error: "Error al obtener los tiempos de la orden." });
+    }
+  },
+);
 
 // GET /api/ordenes/:id/insumos-descontados?lineas=12,13
 // Qué insumos (y cuánto de cada uno) se descontarían/descontaron por las
@@ -267,46 +378,53 @@ router.get('/:id/tiempos', requiereRol('administrador', 'encargado'), async (req
 // checklist de "qué se rescata / qué ya es merma" cuando la comanda está en
 // 'preparando' (ver PATCH /api/ventas/:id/cancelar). Es una consulta, no
 // escribe nada: se puede llamar antes de decidir qué cancelar.
-router.get('/:id/insumos-descontados', requiereRol('administrador', 'encargado'), async (req, res) => {
-  const { id } = req.params;
-  try {
-    let ordenDetalleIds;
-    if (req.query.lineas) {
-      ordenDetalleIds = String(req.query.lineas)
-        .split(',')
-        .map((v) => Number(v.trim()))
-        .filter((v) => Number.isInteger(v));
-    } else {
-      const lineas = await pool.query('SELECT id FROM orden_detalle WHERE orden_id = $1 AND cancelado = FALSE', [
-        id,
-      ]);
-      ordenDetalleIds = lineas.rows.map((r) => r.id);
+router.get(
+  "/:id/insumos-descontados",
+  requiereRol("administrador", "encargado"),
+  async (req, res) => {
+    const { id } = req.params;
+    try {
+      let ordenDetalleIds;
+      if (req.query.lineas) {
+        ordenDetalleIds = String(req.query.lineas)
+          .split(",")
+          .map((v) => Number(v.trim()))
+          .filter((v) => Number.isInteger(v));
+      } else {
+        const lineas = await pool.query(
+          "SELECT id FROM orden_detalle WHERE orden_id = $1 AND cancelado = FALSE",
+          [id],
+        );
+        ordenDetalleIds = lineas.rows.map((r) => r.id);
+      }
+
+      const insumos = await calcularInsumosDeLineas(pool, ordenDetalleIds);
+      if (insumos.length === 0) {
+        return res.json([]);
+      }
+
+      const insumoIds = insumos.map((i) => i.insumo_id);
+      const nombres = await pool.query(
+        "SELECT id, nombre, unidad_medida FROM insumos WHERE id = ANY($1::int[])",
+        [insumoIds],
+      );
+      const datosPorId = new Map(nombres.rows.map((r) => [r.id, r]));
+
+      res.json(
+        insumos.map((i) => ({
+          insumo_id: i.insumo_id,
+          cantidad: i.cantidad,
+          nombre: datosPorId.get(i.insumo_id)?.nombre ?? "(insumo eliminado)",
+          unidad_medida: datosPorId.get(i.insumo_id)?.unidad_medida ?? "",
+        })),
+      );
+    } catch (error) {
+      console.error(error);
+      res
+        .status(500)
+        .json({ error: "Error al calcular los insumos descontados." });
     }
-
-    const insumos = await calcularInsumosDeLineas(pool, ordenDetalleIds);
-    if (insumos.length === 0) {
-      return res.json([]);
-    }
-
-    const insumoIds = insumos.map((i) => i.insumo_id);
-    const nombres = await pool.query(
-      'SELECT id, nombre, unidad_medida FROM insumos WHERE id = ANY($1::int[])',
-      [insumoIds]
-    );
-    const datosPorId = new Map(nombres.rows.map((r) => [r.id, r]));
-
-    res.json(
-      insumos.map((i) => ({
-        insumo_id: i.insumo_id,
-        cantidad: i.cantidad,
-        nombre: datosPorId.get(i.insumo_id)?.nombre ?? '(insumo eliminado)',
-        unidad_medida: datosPorId.get(i.insumo_id)?.unidad_medida ?? '',
-      }))
-    );
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al calcular los insumos descontados.' });
-  }
-});
+  },
+);
 
 module.exports = router;

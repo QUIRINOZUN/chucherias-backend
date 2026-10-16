@@ -58,23 +58,37 @@
 //   de insumo, no solo texto) — se guardan en `orden_detalle_insumos` para
 //   que el descuento automático de inventario (routes/ordenes.js, al pasar
 //   la comanda a 'preparando') sepa qué NO restar.
+//
+//   RF-23 (2026-10-16): si la venta cancelada (TOTAL, no parcial) había
+//   generado una visita de lealtad, esa visita (y el descuento, si lo hubo)
+//   se revierte — "no se toma en cuenta para los puntos", confirmado en la
+//   entrevista con la titular. Ver la sección correspondiente más abajo.
 // =============================================================================
-const express = require('express');
-const pool = require('../db');
-const { verificarToken, requiereRol } = require('../middleware/auth');
-const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
-const { calcularInsumosDeLineas, registrarMovimientosInventario } = require('../utils/inventarioOrden');
+const express = require("express");
+const pool = require("../db");
+const { verificarToken, requiereRol } = require("../middleware/auth");
+const {
+  fechaHoyNegocio,
+  diaNegocioSql,
+  fechaValida,
+} = require("../utils/fecha");
+const {
+  calcularInsumosDeLineas,
+  registrarMovimientosInventario,
+} = require("../utils/inventarioOrden");
 
 const router = express.Router();
 
 router.use(verificarToken);
 
 // Genera un número de orden único y legible: ORD-<fecha>-<sufijo aleatorio>
-// Ejemplo: ORD-20260926-4821. (Pendiente menor: la fecha usa UTC, así que
-// después de las 6:00 pm locales puede llevar la fecha del día siguiente;
-// no afecta la lógica de ventas ni de caja.)
+// Ejemplo: ORD-20260926-4821. La fecha es el día del negocio en hora de
+// Durango (fechaHoyNegocio, ver utils/fecha.js) — antes usaba
+// `new Date().toISOString()` (UTC), así que después de las 6:00 pm locales
+// el número de orden quedaba con la fecha del día siguiente aunque la venta
+// siguiera siendo del día de hoy en el corte de caja.
 function generarNumeroOrden() {
-  const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const fecha = fechaHoyNegocio().replace(/-/g, "");
   const sufijo = Math.floor(1000 + Math.random() * 9000);
   return `ORD-${fecha}-${sufijo}`;
 }
@@ -87,171 +101,386 @@ function generarNumeroOrden() {
 // Cuerpo esperado:
 //   { metodo_pago: 'efectivo'|'transferencia',
 //     tipo_entrega?: 'presencial'|'domicilio',            (por defecto presencial)
+//     cliente_nombre?, cliente_direccion?, cliente_telefono?, (obligatorios SOLO si domicilio)
+//     repartidor_id?,   (opcional, solo tiene sentido si domicilio — ver sección 2)
 //     items: [{ variante_id, cantidad, notas? }],
-//     cliente_id? }                                       (reservado para lealtad)
+//     cliente_id? }      (RF-21/RF-22: cliente de lealtad, opcional — ver sección 4)
 // Respuesta 201: { orden, venta }.
-router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req, res) => {
-  const { items, metodo_pago, cliente_id } = req.body;
-  const tipo_entrega = req.body.tipo_entrega || 'presencial';
+router.post(
+  "/",
+  requiereRol("administrador", "encargado", "cajero"),
+  async (req, res) => {
+    const { items, metodo_pago, cliente_id } = req.body;
+    const tipo_entrega = req.body.tipo_entrega || "presencial";
+    // Entrevista con la titular: una orden debe poder registrar "nombre del
+    // repartidor" — opcional (puede asignarse después desde Comandas, ver
+    // PATCH /api/ordenes/:id/repartidor) y solo tiene sentido en domicilio.
+    const repartidorId =
+      tipo_entrega === "domicilio" ? req.body.repartidor_id || null : null;
 
-  // ---- Validaciones de entrada (antes de tocar la base de datos) ----------
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'La venta debe incluir al menos un producto.' });
-  }
-  if (!['efectivo', 'transferencia'].includes(metodo_pago)) {
-    return res.status(400).json({ error: 'El método de pago debe ser efectivo o transferencia.' });
-  }
-  if (!['presencial', 'domicilio'].includes(tipo_entrega)) {
-    return res.status(400).json({ error: 'El tipo de entrega debe ser presencial o domicilio.' });
-  }
-
-  const varianteIds = items.map((item) => item.variante_id);
-  if (varianteIds.some((id) => !Number.isInteger(id))) {
-    return res.status(400).json({ error: 'Hay un producto inválido en el carrito.' });
-  }
-
-  // Se toma UNA conexión exclusiva del pool: una transacción solo funciona si
-  // todas sus consultas viajan por la misma conexión.
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    // ---- 1) Precios reales, leídos del servidor ---------------------------
-    const variantesResultado = await client.query(
-      `SELECT id, precio FROM variantes_producto WHERE id = ANY($1::int[])`,
-      [varianteIds]
-    );
-
-    // Diccionario { variante_id: precio } para consultar cada precio rápido.
-    const precioPorVariante = {};
-    for (const fila of variantesResultado.rows) {
-      precioPorVariante[fila.id] = Number(fila.precio);
+    // ---- Validaciones de entrada (antes de tocar la base de datos) ----------
+    if (!Array.isArray(items) || items.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "La venta debe incluir al menos un producto." });
+    }
+    if (!["efectivo", "transferencia"].includes(metodo_pago)) {
+      return res.status(400).json({
+        error: "El método de pago debe ser efectivo o transferencia.",
+      });
+    }
+    if (!["presencial", "domicilio"].includes(tipo_entrega)) {
+      return res
+        .status(400)
+        .json({ error: "El tipo de entrega debe ser presencial o domicilio." });
     }
 
-    // Si alguna variante enviada no existe, se aborta la venta completa.
-    for (const varianteId of varianteIds) {
-      if (precioPorVariante[varianteId] === undefined) {
-        throw { status: 400, mensaje: `El producto con variante ${varianteId} no existe.` };
-      }
+    // 2026-10-11/12: nombre, dirección y teléfono del cliente, obligatorios
+    // SOLO para domicilio (en presencial se ignoran, aunque lleguen, para no
+    // guardar basura a medias si el frontend se equivoca).
+    const clienteNombre =
+      tipo_entrega === "domicilio" ? req.body.cliente_nombre?.trim() : null;
+    const clienteDireccion =
+      tipo_entrega === "domicilio" ? req.body.cliente_direccion?.trim() : null;
+    const clienteTelefono =
+      tipo_entrega === "domicilio" ? req.body.cliente_telefono?.trim() : null;
+    if (
+      tipo_entrega === "domicilio" &&
+      (!clienteNombre || !clienteDireccion || !clienteTelefono)
+    ) {
+      return res.status(400).json({
+        error:
+          "Un pedido a domicilio necesita el nombre, la dirección y el teléfono del cliente.",
+      });
     }
 
-    // ---- 2) La orden (la comanda que verá la cocina) ----------------------
-    // Nace en 'sin_preparar' (Sprint 2): aparece de inmediato en el tablero
-    // de comandas. `creado_por` guarda quién la registró (viene del token).
-    const orden = await client.query(
-      `INSERT INTO ordenes (numero_orden, cliente_id, tipo_entrega, estado, creado_por)
-       VALUES ($1, $2, $3, 'sin_preparar', $4)
-       RETURNING *`,
-      [generarNumeroOrden(), cliente_id || null, tipo_entrega, req.usuario.id]
-    );
+    const varianteIds = items.map((item) => item.variante_id);
+    if (varianteIds.some((id) => !Number.isInteger(id))) {
+      return res
+        .status(400)
+        .json({ error: "Hay un producto inválido en el carrito." });
+    }
 
-    // RF-08: abre el primer renglón de tiempo por estado ('sin_preparar'),
-    // que routes/ordenes.js irá cerrando y reabriendo en cada avance.
-    await client.query(
-      `INSERT INTO orden_estado_historial (orden_id, estado, fecha_inicio, responsable_id)
-       VALUES ($1, 'sin_preparar', NOW(), $2)`,
-      [orden.rows[0].id, req.usuario.id]
-    );
+    // Se toma UNA conexión exclusiva del pool: una transacción solo funciona si
+    // todas sus consultas viajan por la misma conexión.
+    const client = await pool.connect();
 
-    // ---- 3) Detalle de la orden + cálculo del subtotal --------------------
-    let subtotal = 0;
-    for (const item of items) {
-      // Cantidad inválida o cero se corrige a 1.
-      const cantidad = Number(item.cantidad) > 0 ? Number(item.cantidad) : 1;
-      const precioUnitario = precioPorVariante[item.variante_id];
-      subtotal += precioUnitario * cantidad;
+    try {
+      await client.query("BEGIN");
 
-      // El precio se guarda en el renglón ("congelado"): si el menú cambia de
-      // precio mañana, esta venta conserva lo que realmente se cobró.
-      // `notas` trae la personalización ("Sin: tocino · sin picante").
-      const detalle = await client.query(
-        `INSERT INTO orden_detalle (orden_id, variante_id, cantidad, precio_unitario, notas)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id`,
-        [orden.rows[0].id, item.variante_id, cantidad, precioUnitario, item.notas || null]
+      // ---- 1) Precios reales, leídos del servidor ---------------------------
+      const variantesResultado = await client.query(
+        `SELECT id, precio FROM variantes_producto WHERE id = ANY($1::int[])`,
+        [varianteIds],
       );
 
-      // Fase 2 del recetario: ingredientes quitados, como insumo real (no
-      // solo texto), para que el descuento automático sepa qué NO restar al
-      // preparar esta línea (ver PATCH /api/ordenes/:id/estado). Un nombre
-      // que no coincida con ningún insumo se ignora en silencio: es mejor
-      // perder la exclusión de ESE ingrediente que tumbar la venta completa
-      // por un nombre mal escrito en el catálogo del POS.
-      for (const nombreInsumo of item.insumos_quitados || []) {
-        const insumo = await client.query('SELECT id FROM insumos WHERE nombre = $1', [nombreInsumo]);
-        if (insumo.rows.length === 0) {
-          continue;
+      // Diccionario { variante_id: precio } para consultar cada precio rápido.
+      const precioPorVariante = {};
+      for (const fila of variantesResultado.rows) {
+        precioPorVariante[fila.id] = Number(fila.precio);
+      }
+
+      // Si alguna variante enviada no existe, se aborta la venta completa.
+      for (const varianteId of varianteIds) {
+        if (precioPorVariante[varianteId] === undefined) {
+          throw {
+            status: 400,
+            mensaje: `El producto con variante ${varianteId} no existe.`,
+          };
         }
-        await client.query(
-          `INSERT INTO orden_detalle_insumos (orden_detalle_id, insumo_id, tipo)
+      }
+
+      // Si viene un cliente de lealtad, debe existir ANTES de insertar la
+      // orden (que lo referencia por FK) — si no, Postgres rechazaría el
+      // INSERT con un error de llave foránea genérico en vez de este 400
+      // claro. El cómputo completo de visita/descuento (que sí necesita el
+      // subtotal) vive más abajo, en la sección 4.
+      if (cliente_id) {
+        const clienteExiste = await client.query(
+          `SELECT 1 FROM clientes WHERE id = $1`,
+          [cliente_id],
+        );
+        if (clienteExiste.rows.length === 0) {
+          throw {
+            status: 400,
+            mensaje: "El cliente de lealtad seleccionado no existe.",
+          };
+        }
+      }
+
+      // Mismo criterio: si viene un repartidor, debe existir y estar activo
+      // ANTES de insertar la orden (que lo referencia por FK).
+      if (repartidorId) {
+        const repartidorExiste = await client.query(
+          `SELECT 1 FROM empleados WHERE id = $1 AND activo = TRUE AND puesto ILIKE '%repartidor%'`,
+          [repartidorId],
+        );
+        if (repartidorExiste.rows.length === 0) {
+          throw {
+            status: 400,
+            mensaje: "El repartidor seleccionado no existe o no está activo.",
+          };
+        }
+      }
+
+      // ---- 2) La orden (la comanda que verá la cocina) ----------------------
+      // Nace en 'sin_preparar' (Sprint 2): aparece de inmediato en el tablero
+      // de comandas. `creado_por` guarda quién la registró (viene del token).
+      const orden = await client.query(
+        `INSERT INTO ordenes
+         (numero_orden, cliente_id, tipo_entrega, estado, creado_por,
+          cliente_nombre, cliente_direccion, cliente_telefono, repartidor_id)
+       VALUES ($1, $2, $3, 'sin_preparar', $4, $5, $6, $7, $8)
+       RETURNING *`,
+        [
+          generarNumeroOrden(),
+          cliente_id || null,
+          tipo_entrega,
+          req.usuario.id,
+          clienteNombre,
+          clienteDireccion,
+          clienteTelefono,
+          repartidorId,
+        ],
+      );
+
+      // RF-08: abre el primer renglón de tiempo por estado ('sin_preparar'),
+      // que routes/ordenes.js irá cerrando y reabriendo en cada avance.
+      await client.query(
+        `INSERT INTO orden_estado_historial (orden_id, estado, fecha_inicio, responsable_id)
+       VALUES ($1, 'sin_preparar', NOW(), $2)`,
+        [orden.rows[0].id, req.usuario.id],
+      );
+
+      // ---- 3) Detalle de la orden + cálculo del subtotal --------------------
+      let subtotal = 0;
+      for (const item of items) {
+        // Cantidad inválida o cero se corrige a 1.
+        const cantidad = Number(item.cantidad) > 0 ? Number(item.cantidad) : 1;
+        const precioUnitario = precioPorVariante[item.variante_id];
+        subtotal += precioUnitario * cantidad;
+
+        // El precio se guarda en el renglón ("congelado"): si el menú cambia de
+        // precio mañana, esta venta conserva lo que realmente se cobró.
+        // `notas` trae la personalización ("Sin: tocino · sin picante").
+        const detalle = await client.query(
+          `INSERT INTO orden_detalle (orden_id, variante_id, cantidad, precio_unitario, notas)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id`,
+          [
+            orden.rows[0].id,
+            item.variante_id,
+            cantidad,
+            precioUnitario,
+            item.notas || null,
+          ],
+        );
+
+        // Fase 2 del recetario: ingredientes quitados, como insumo real (no
+        // solo texto), para que el descuento automático sepa qué NO restar al
+        // preparar esta línea (ver PATCH /api/ordenes/:id/estado). Un nombre
+        // que no coincida con ningún insumo se ignora en silencio: es mejor
+        // perder la exclusión de ESE ingrediente que tumbar la venta completa
+        // por un nombre mal escrito en el catálogo del POS.
+        for (const nombreInsumo of item.insumos_quitados || []) {
+          const insumo = await client.query(
+            "SELECT id FROM insumos WHERE nombre = $1",
+            [nombreInsumo],
+          );
+          if (insumo.rows.length === 0) {
+            continue;
+          }
+          await client.query(
+            `INSERT INTO orden_detalle_insumos (orden_detalle_id, insumo_id, tipo)
            VALUES ($1, $2, 'quitado')`,
-          [detalle.rows[0].id, insumo.rows[0].id]
-        );
-      }
-
-      // Y los insumos ELEGIDOS (salsa/topping/dip): no están en la receta fija
-      // de la variante (esa línea se dejó fuera a propósito), así que aquí sí
-      // se guarda también la cantidad — es la única fuente de esa cantidad
-      // para cuando se descuente el inventario.
-      for (const elegido of item.insumos_elegidos || []) {
-        const insumo = await client.query('SELECT id FROM insumos WHERE nombre = $1', [elegido.insumo]);
-        if (insumo.rows.length === 0) {
-          continue;
+            [detalle.rows[0].id, insumo.rows[0].id],
+          );
         }
-        await client.query(
-          `INSERT INTO orden_detalle_insumos (orden_detalle_id, insumo_id, tipo, cantidad, unidad_medida)
-           VALUES ($1, $2, 'elegido', $3, $4)`,
-          [detalle.rows[0].id, insumo.rows[0].id, elegido.cantidad, elegido.unidad_medida]
-        );
+
+        // Y los insumos ELEGIDOS (salsa/topping/dip): no están en la receta fija
+        // de la variante (esa línea se dejó fuera a propósito), así que aquí sí
+        // se guarda también la cantidad — es la única fuente de esa cantidad
+        // para cuando se descuente el inventario.
+        //
+        // RF-16 (2026-10-13): si el insumo elegido tiene costo_extra (ej.
+        // "cacahuate diferente" +$5), se suma al subtotal — escalado por la
+        // cantidad del renglón (2 Pepihuates con el mismo extra = 2× el
+        // cargo), igual que ya escala la cantidad del insumo descontado. El
+        // cargo se resuelve aquí, del lado del servidor, buscando el insumo
+        // por nombre — nunca viene un precio del cliente. Se congela en
+        // costo_extra_aplicado para que esta venta conserve lo cobrado aunque
+        // el costo_extra del insumo cambie después.
+        for (const elegido of item.insumos_elegidos || []) {
+          const insumo = await client.query(
+            "SELECT id, costo_extra FROM insumos WHERE nombre = $1",
+            [elegido.insumo],
+          );
+          if (insumo.rows.length === 0) {
+            continue;
+          }
+          const costoExtraUnitario = Number(insumo.rows[0].costo_extra) || 0;
+          const costoExtraAplicado =
+            costoExtraUnitario > 0 ? costoExtraUnitario * cantidad : null;
+          if (costoExtraAplicado) {
+            subtotal += costoExtraAplicado;
+          }
+          await client.query(
+            `INSERT INTO orden_detalle_insumos
+             (orden_detalle_id, insumo_id, tipo, cantidad, unidad_medida, costo_extra_aplicado)
+           VALUES ($1, $2, 'elegido', $3, $4, $5)`,
+            [
+              detalle.rows[0].id,
+              insumo.rows[0].id,
+              elegido.cantidad,
+              elegido.unidad_medida,
+              costoExtraAplicado,
+            ],
+          );
+        }
       }
-    }
 
-    // ---- 4) El cobro -------------------------------------------------------
-    // El descuento por lealtad todavía no está implementado (pendiente de construir).
-    const descuentoLealtad = 0;
-    const total = subtotal - descuentoLealtad;
+      // ---- 4) Lealtad (RF-21/RF-22, 2026-10-15) -----------------------------
+      // Solo si el cobro trae un cliente_id (opcional — "cliente ocasional" no
+      // participa). Reglas de negocio (ver cabecera de routes/clientes.js):
+      // 1 visita/cliente/día, solo si el subtotal >= $100; ciclo de 10
+      // visitas que se reinicia (visita #5 del ciclo = 5%, #10 = 15% y
+      // vuelve a 0). El cálculo vive AQUÍ, no en clientes.js, porque es
+      // aquí donde se conoce el subtotal real de ESTA compra.
+      let descuentoLealtad = 0;
+      let infoLealtad = null;
+      if (cliente_id) {
+        // FOR UPDATE: dos cobros simultáneos del mismo cliente no pueden
+        // pisarse el contador de visitas.
+        const clienteFila = await client.query(
+          `SELECT id, visitas_acumuladas FROM clientes WHERE id = $1 FOR UPDATE`,
+          [cliente_id],
+        );
+        if (clienteFila.rows.length === 0) {
+          throw {
+            status: 400,
+            mensaje: "El cliente de lealtad seleccionado no existe.",
+          };
+        }
+        const visitasActuales = clienteFila.rows[0].visitas_acumuladas;
 
-    const venta = await client.query(
-      `INSERT INTO ventas (orden_id, subtotal, descuento_lealtad, total, metodo_pago, cajero_id)
+        const yaVisitoHoy = await client.query(
+          `SELECT 1 FROM lealtad_historial
+           WHERE cliente_id = $1 AND tipo_evento = 'visita'
+             AND ${diaNegocioSql("fecha")} = $2
+           LIMIT 1`,
+          [cliente_id, fechaHoyNegocio()],
+        );
+
+        if (yaVisitoHoy.rows.length === 0 && subtotal >= 100) {
+          const visitaNumero = visitasActuales + 1;
+          let descuentoPorcentaje = 0;
+          let nuevasVisitas = visitaNumero;
+          let descripcionDescuento = null;
+
+          if (visitaNumero === 10) {
+            descuentoPorcentaje = 0.15;
+            nuevasVisitas = 0;
+            descripcionDescuento = "15% por completar el ciclo de 10 visitas";
+          } else if (visitaNumero === 5) {
+            descuentoPorcentaje = 0.05;
+            descripcionDescuento = "5% por llegar a 5 visitas del ciclo";
+          }
+
+          descuentoLealtad =
+            Math.round(subtotal * descuentoPorcentaje * 100) / 100;
+
+          infoLealtad = {
+            cliente_id,
+            visitaNumero,
+            nuevasVisitas,
+            descripcionDescuento,
+          };
+        }
+      }
+
+      // ---- 5) El cobro --------------------------------------------------------
+      const total = subtotal - descuentoLealtad;
+
+      const venta = await client.query(
+        `INSERT INTO ventas (orden_id, subtotal, descuento_lealtad, total, metodo_pago, cajero_id)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [orden.rows[0].id, subtotal, descuentoLealtad, total, metodo_pago, req.usuario.id]
-    );
+        [
+          orden.rows[0].id,
+          subtotal,
+          descuentoLealtad,
+          total,
+          metodo_pago,
+          req.usuario.id,
+        ],
+      );
 
-    // Todo salió bien: se confirman las tres escrituras a la vez.
-    await client.query('COMMIT');
+      // Se registra la visita (y, si aplica, el descuento) ya con el id real
+      // de la venta — después de insertarla, para poder ligarlos.
+      if (infoLealtad) {
+        await client.query(
+          `UPDATE clientes SET visitas_acumuladas = $1 WHERE id = $2`,
+          [infoLealtad.nuevasVisitas, infoLealtad.cliente_id],
+        );
+        await client.query(
+          `INSERT INTO lealtad_historial (cliente_id, venta_id, tipo_evento, descripcion, visita_numero)
+           VALUES ($1, $2, 'visita', $3, $4)`,
+          [
+            infoLealtad.cliente_id,
+            venta.rows[0].id,
+            `Visita #${infoLealtad.visitaNumero} del ciclo`,
+            infoLealtad.visitaNumero,
+          ],
+        );
+        if (infoLealtad.descripcionDescuento) {
+          await client.query(
+            `INSERT INTO lealtad_historial (cliente_id, venta_id, tipo_evento, descripcion)
+             VALUES ($1, $2, 'descuento_aplicado', $3)`,
+            [
+              infoLealtad.cliente_id,
+              venta.rows[0].id,
+              infoLealtad.descripcionDescuento,
+            ],
+          );
+        }
+      }
 
-    res.status(201).json({
-      orden: orden.rows[0],
-      venta: venta.rows[0],
-    });
-  } catch (error) {
-    // Cualquier fallo deshace TODO lo escrito arriba: nunca queda una orden
-    // sin venta ni un detalle a medias.
-    await client.query('ROLLBACK');
-    // Los errores "esperados" (validaciones) se lanzan como { status, mensaje }.
-    if (error.status) {
-      return res.status(error.status).json({ error: error.mensaje });
+      // Todo salió bien: se confirman todas las escrituras a la vez.
+      await client.query("COMMIT");
+
+      res.status(201).json({
+        orden: orden.rows[0],
+        venta: venta.rows[0],
+      });
+    } catch (error) {
+      // Cualquier fallo deshace TODO lo escrito arriba: nunca queda una orden
+      // sin venta ni un detalle a medias.
+      await client.query("ROLLBACK");
+      // Los errores "esperados" (validaciones) se lanzan como { status, mensaje }.
+      if (error.status) {
+        return res.status(error.status).json({ error: error.mensaje });
+      }
+      console.error(error);
+      res.status(500).json({ error: "Error al registrar la venta." });
+    } finally {
+      // Siempre se devuelve la conexión al pool, haya éxito o error.
+      client.release();
     }
-    console.error(error);
-    res.status(500).json({ error: 'Error al registrar la venta.' });
-  } finally {
-    // Siempre se devuelve la conexión al pool, haya éxito o error.
-    client.release();
-  }
-});
+  },
+);
 
 // GET /api/ventas?fecha=YYYY-MM-DD
 // Lista las ventas del día (o de la fecha indicada) con sus productos,
 // más recientes primero. Es información financiera: solo administrador y
 // encargado (RNF-03), igual que /api/caja/cortes.
 // "Del día" significa el día del negocio en hora de Durango (utils/fecha.js).
-router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
+router.get("/", requiereRol("administrador", "encargado"), async (req, res) => {
   const fecha = req.query.fecha || fechaHoyNegocio();
 
   if (!fechaValida(fecha)) {
-    return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+    return res
+      .status(400)
+      .json({ error: "La fecha debe tener el formato AAAA-MM-DD." });
   }
 
   try {
@@ -261,6 +490,9 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
     // venta no cancelada).
     const ventas = await pool.query(
       `SELECT v.*, o.id AS orden_id, o.numero_orden, o.tipo_entrega, o.estado AS estado_orden,
+              o.cliente_nombre, o.cliente_direccion, o.cliente_telefono,
+              c.nombre_completo AS cliente_lealtad_nombre,
+              e.nombre AS repartidor_nombre,
               u.nombre AS cajero, uc.nombre AS cancelado_por_nombre,
               (SELECT COUNT(*)::int FROM mermas m WHERE m.orden_id = o.id) AS mermas_generadas,
               (SELECT COALESCE(SUM(m.valor_unitario * m.cantidad), 0) FROM mermas m WHERE m.orden_id = o.id) AS mermas_valor_total,
@@ -281,9 +513,11 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
        JOIN ordenes o ON o.id = v.orden_id
        JOIN usuarios u ON u.id = v.cajero_id
        LEFT JOIN usuarios uc ON uc.id = v.cancelado_por
-       WHERE ${diaNegocioSql('v.fecha')} = $1
+       LEFT JOIN clientes c ON c.id = o.cliente_id
+       LEFT JOIN empleados e ON e.id = o.repartidor_id
+       WHERE ${diaNegocioSql("v.fecha")} = $1
        ORDER BY v.fecha DESC`,
-      [fecha]
+      [fecha],
     );
 
     if (ventas.rows.length === 0) {
@@ -300,7 +534,7 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
        JOIN variantes_producto vp ON vp.id = od.variante_id
        JOIN productos p ON p.id = vp.producto_id
        WHERE od.orden_id = ANY($1::int[])`,
-      [ordenIds]
+      [ordenIds],
     );
 
     // Se agrupan los renglones por orden: { orden_id: [item, item, …] }.
@@ -330,7 +564,7 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
     res.json(resultado);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error al obtener las ventas.' });
+    res.status(500).json({ error: "Error al obtener las ventas." });
   }
 });
 
@@ -350,160 +584,247 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
 //
 // La venta, la orden/líneas, las mermas, la restitución de inventario y el
 // reembolso se registran en una sola transacción.
-router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (req, res) => {
-  const { id } = req.params;
-  const { motivo, orden_detalle_ids: lineasSolicitadas, insumos_rescatados } = req.body;
+router.patch(
+  "/:id/cancelar",
+  requiereRol("administrador", "encargado"),
+  async (req, res) => {
+    const { id } = req.params;
+    const {
+      motivo,
+      orden_detalle_ids: lineasSolicitadas,
+      insumos_rescatados,
+    } = req.body;
 
-  const client = await pool.connect();
+    const client = await pool.connect();
 
-  try {
-    await client.query('BEGIN');
+    try {
+      await client.query("BEGIN");
 
-    // La venta debe seguir 'completada' (impide cancelar algo ya cancelado
-    // del todo). FOR UPDATE: dos cancelaciones a la vez no pisan el cálculo.
-    const venta = await client.query(`SELECT * FROM ventas WHERE id = $1 FOR UPDATE`, [id]);
-    if (venta.rows.length === 0 || venta.rows[0].estado !== 'completada') {
-      throw { status: 404, mensaje: 'La venta no existe o ya fue cancelada.' };
-    }
+      // La venta debe seguir 'completada' (impide cancelar algo ya cancelado
+      // del todo). FOR UPDATE: dos cancelaciones a la vez no pisan el cálculo.
+      const venta = await client.query(
+        `SELECT * FROM ventas WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      if (venta.rows.length === 0 || venta.rows[0].estado !== "completada") {
+        throw {
+          status: 404,
+          mensaje: "La venta no existe o ya fue cancelada.",
+        };
+      }
 
-    const ordenId = venta.rows[0].orden_id;
+      const ordenId = venta.rows[0].orden_id;
 
-    // Estado de la orden ANTES de tocar nada: decide qué pasa con los
-    // insumos (rescate selectivo, merma automática, o nada que descontar).
-    const ordenActual = await client.query(
-      `SELECT estado, numero_orden FROM ordenes WHERE id = $1 FOR UPDATE`,
-      [ordenId]
-    );
-    const { estado: estadoOrden, numero_orden: numeroOrden } = ordenActual.rows[0];
+      // Estado de la orden ANTES de tocar nada: decide qué pasa con los
+      // insumos (rescate selectivo, merma automática, o nada que descontar).
+      const ordenActual = await client.query(
+        `SELECT estado, numero_orden, cliente_id FROM ordenes WHERE id = $1 FOR UPDATE`,
+        [ordenId],
+      );
+      const {
+        estado: estadoOrden,
+        numero_orden: numeroOrden,
+        cliente_id: clienteLealtadId,
+      } = ordenActual.rows[0];
 
-    // Líneas activas (no canceladas todavía) de la orden — son las únicas
-    // candidatas a cancelar ahora.
-    const lineasActivas = await client.query(
-      `SELECT id, variante_id, cantidad, precio_unitario
+      // Líneas activas (no canceladas todavía) de la orden — son las únicas
+      // candidatas a cancelar ahora.
+      const lineasActivas = await client.query(
+        `SELECT id, variante_id, cantidad, precio_unitario
        FROM orden_detalle WHERE orden_id = $1 AND cancelado = FALSE`,
-      [ordenId]
-    );
-    if (lineasActivas.rows.length === 0) {
-      throw { status: 409, mensaje: 'Esta venta ya no tiene productos activos que cancelar.' };
-    }
+        [ordenId],
+      );
+      if (lineasActivas.rows.length === 0) {
+        throw {
+          status: 409,
+          mensaje: "Esta venta ya no tiene productos activos que cancelar.",
+        };
+      }
 
-    // Sin `orden_detalle_ids` (o vacío), se cancelan TODAS las líneas activas
-    // — es el "cancelar la venta completa" de siempre. Con la lista, solo
-    // las que de verdad siguen activas (una línea ya cancelada se ignora en
-    // silencio en vez de dar error, por si el cliente manda algo desfasado).
-    const idsSolicitados = Array.isArray(lineasSolicitadas) ? new Set(lineasSolicitadas) : null;
-    const lineasACancelar =
-      idsSolicitados && idsSolicitados.size > 0
-        ? lineasActivas.rows.filter((l) => idsSolicitados.has(l.id))
-        : lineasActivas.rows;
+      // Sin `orden_detalle_ids` (o vacío), se cancelan TODAS las líneas activas
+      // — es el "cancelar la venta completa" de siempre. Con la lista, solo
+      // las que de verdad siguen activas (una línea ya cancelada se ignora en
+      // silencio en vez de dar error, por si el cliente manda algo desfasado).
+      const idsSolicitados = Array.isArray(lineasSolicitadas)
+        ? new Set(lineasSolicitadas)
+        : null;
+      const lineasACancelar =
+        idsSolicitados && idsSolicitados.size > 0
+          ? lineasActivas.rows.filter((l) => idsSolicitados.has(l.id))
+          : lineasActivas.rows;
 
-    if (lineasACancelar.length === 0) {
-      throw { status: 400, mensaje: 'Selecciona al menos un producto para cancelar.' };
-    }
+      if (lineasACancelar.length === 0) {
+        throw {
+          status: 400,
+          mensaje: "Selecciona al menos un producto para cancelar.",
+        };
+      }
 
-    // ---- MERMA a nivel producto: una fila por cada línea cancelada AHORA ----
-    let valorTotalMerma = 0;
-    for (const linea of lineasACancelar) {
-      valorTotalMerma += Number(linea.precio_unitario) * Number(linea.cantidad);
-      await client.query(
-        `INSERT INTO mermas
+      // ---- MERMA a nivel producto: una fila por cada línea cancelada AHORA ----
+      let valorTotalMerma = 0;
+      for (const linea of lineasACancelar) {
+        valorTotalMerma +=
+          Number(linea.precio_unitario) * Number(linea.cantidad);
+        await client.query(
+          `INSERT INTO mermas
            (variante_id, cantidad, motivo, responsable_id, orden_id, valor_unitario, estado_orden_previo)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [
-          linea.variante_id,
-          linea.cantidad,
-          `Venta cancelada — orden ${numeroOrden} estaba en "${estadoOrden}"`,
-          req.usuario.id,
-          ordenId,
-          linea.precio_unitario,
-          estadoOrden,
-        ]
-      );
-      await client.query(
-        `UPDATE orden_detalle SET cancelado = TRUE, fecha_cancelacion = NOW(), motivo_cancelacion = $2 WHERE id = $1`,
-        [linea.id, motivo || null]
-      );
-    }
-
-    // ---- INSUMOS: rescate selectivo (preparando), merma automática (por_entregar/
-    // entregado), o nada que hacer (sin_preparar — nunca se descontó) ----
-    let insumosRestituidos = 0;
-    if (estadoOrden === 'preparando') {
-      const insumosDescontados = await calcularInsumosDeLineas(
-        client,
-        lineasACancelar.map((l) => l.id)
-      );
-      const idsRescatados = new Set(Array.isArray(insumos_rescatados) ? insumos_rescatados : []);
-      const aRestituir = insumosDescontados.filter((i) => idsRescatados.has(i.insumo_id));
-      if (aRestituir.length > 0) {
-        await registrarMovimientosInventario(client, aRestituir, {
-          tipo: 'entrada',
-          responsableId: req.usuario.id,
-          motivo: `Restitución parcial por cancelación — orden ${numeroOrden}`,
-          ordenId,
-        });
+          [
+            linea.variante_id,
+            linea.cantidad,
+            `Venta cancelada — orden ${numeroOrden} estaba en "${estadoOrden}"`,
+            req.usuario.id,
+            ordenId,
+            linea.precio_unitario,
+            estadoOrden,
+          ],
+        );
+        await client.query(
+          `UPDATE orden_detalle SET cancelado = TRUE, fecha_cancelacion = NOW(), motivo_cancelacion = $2 WHERE id = $1`,
+          [linea.id, motivo || null],
+        );
       }
-      insumosRestituidos = aRestituir.length;
-    }
-    // 'sin_preparar': nunca se descontó nada, no hay nada que rescatar ni perder.
-    // 'por_entregar' / 'entregado': el producto ya está armado — todo el insumo
-    // ya descontado queda como consumido, no se restituye nada automáticamente.
 
-    // ---- ¿Queda alguna línea activa? Si no, la venta y la orden se cancelan
-    // por completo (igual que antes de este ajuste) ----
-    const lineasRestantes = lineasActivas.rows.length - lineasACancelar.length;
-    if (lineasRestantes === 0) {
-      await client.query(
-        `UPDATE ventas SET estado = 'cancelada', cancelado_por = $1, motivo_cancelacion = $2, fecha_cancelacion = NOW()
+      // ---- INSUMOS: rescate selectivo (preparando), merma automática (por_entregar/
+      // entregado), o nada que hacer (sin_preparar — nunca se descontó) ----
+      let insumosRestituidos = 0;
+      if (estadoOrden === "preparando") {
+        const insumosDescontados = await calcularInsumosDeLineas(
+          client,
+          lineasACancelar.map((l) => l.id),
+        );
+        const idsRescatados = new Set(
+          Array.isArray(insumos_rescatados) ? insumos_rescatados : [],
+        );
+        const aRestituir = insumosDescontados.filter((i) =>
+          idsRescatados.has(i.insumo_id),
+        );
+        if (aRestituir.length > 0) {
+          await registrarMovimientosInventario(client, aRestituir, {
+            tipo: "entrada",
+            responsableId: req.usuario.id,
+            motivo: `Restitución parcial por cancelación — orden ${numeroOrden}`,
+            ordenId,
+          });
+        }
+        insumosRestituidos = aRestituir.length;
+      }
+      // 'sin_preparar': nunca se descontó nada, no hay nada que rescatar ni perder.
+      // 'por_entregar' / 'entregado': el producto ya está armado — todo el insumo
+      // ya descontado queda como consumido, no se restituye nada automáticamente.
+
+      // ---- ¿Queda alguna línea activa? Si no, la venta y la orden se cancelan
+      // por completo (igual que antes de este ajuste) ----
+      const lineasRestantes =
+        lineasActivas.rows.length - lineasACancelar.length;
+      if (lineasRestantes === 0) {
+        await client.query(
+          `UPDATE ventas SET estado = 'cancelada', cancelado_por = $1, motivo_cancelacion = $2, fecha_cancelacion = NOW()
          WHERE id = $3`,
-        [req.usuario.id, motivo || null, id]
-      );
-      await client.query(`UPDATE ordenes SET estado = 'cancelada' WHERE id = $1`, [ordenId]);
-      // RF-08: se cierra el renglón de historial que seguía abierto.
-      await client.query(
-        `UPDATE orden_estado_historial SET fecha_fin = NOW() WHERE orden_id = $1 AND fecha_fin IS NULL`,
-        [ordenId]
-      );
-    }
-    // Si quedan líneas activas, la venta sigue 'completada' y la comanda sigue
-    // su curso normal con lo que le queda — solo se le quitaron productos.
+          [req.usuario.id, motivo || null, id],
+        );
+        await client.query(
+          `UPDATE ordenes SET estado = 'cancelada' WHERE id = $1`,
+          [ordenId],
+        );
+        // RF-08: se cierra el renglón de historial que seguía abierto.
+        await client.query(
+          `UPDATE orden_estado_historial SET fecha_fin = NOW() WHERE orden_id = $1 AND fecha_fin IS NULL`,
+          [ordenId],
+        );
+      }
+      // Si quedan líneas activas, la venta sigue 'completada' y la comanda sigue
+      // su curso normal con lo que le queda — solo se le quitaron productos.
 
-    // ---- REEMBOLSO: lo que se le debe devolver al cliente por LO CANCELADO
-    // EN ESTA OPERACIÓN (nunca el total completo de la venta, por si ya hubo
-    // una cancelación parcial anterior) — movimiento de caja, mismo mecanismo
-    // que un retiro (resta del efectivo esperado), ligado a la orden. ----
-    if (valorTotalMerma > 0) {
-      await client.query(
-        `INSERT INTO movimientos_caja (tipo, monto, motivo, responsable_id, confirmado, confirmado_por, fecha_confirmacion, orden_id)
+      // ---- RF-23 / LEALTAD: revertir la visita (y el descuento, si lo hubo)
+      // que esta venta le dio a su cliente — "no se toma en cuenta para los
+      // puntos" (confirmado en la entrevista con la titular). Solo aplica si
+      // la cancelación es TOTAL: una cancelación PARCIAL deja la venta
+      // 'completada' con algo de dinero cobrado, y el subtotal original
+      // (ventas.subtotal nunca se recalcula) ya no refleja con certeza si
+      // seguiría calificando para la visita — se deja fuera a propósito en
+      // vez de adivinar.
+      //
+      // Asume que la cancelación ocurre el MISMO día de la venta (la
+      // titular confirmó en la entrevista que así se cancela siempre, "hasta
+      // el final del día, para no perjudicar el corte") — si se cancelara
+      // días después y el cliente ya hubiera acumulado visitas nuevas
+      // encima, esta reversión simple (−1, o volver a 9 si deshace el
+      // reinicio del ciclo) podría quedar desfasada; en ese caso excepcional
+      // hay que ajustar `clientes.visitas_acumuladas` a mano.
+      let lealtadRevertida = false;
+      if (lineasRestantes === 0 && clienteLealtadId) {
+        const visitaLealtad = await client.query(
+          `SELECT id, visita_numero FROM lealtad_historial
+           WHERE venta_id = $1 AND tipo_evento = 'visita'
+           LIMIT 1`,
+          [id],
+        );
+        if (visitaLealtad.rows.length > 0) {
+          lealtadRevertida = true;
+          const visitaNumero = visitaLealtad.rows[0].visita_numero;
+          const nuevasVisitas =
+            visitaNumero === 10 ? 9 : Math.max(visitaNumero - 1, 0);
+          await client.query(
+            `UPDATE clientes SET visitas_acumuladas = $1 WHERE id = $2`,
+            [nuevasVisitas, clienteLealtadId],
+          );
+          // Se borran ambas filas (visita + descuento_aplicado, si hubo) —
+          // "no se toma en cuenta", no queda un registro de algo que ya no
+          // ocurrió.
+          await client.query(
+            `DELETE FROM lealtad_historial WHERE venta_id = $1`,
+            [id],
+          );
+        }
+      }
+
+      // ---- REEMBOLSO: lo que se le debe devolver al cliente por LO CANCELADO
+      // EN ESTA OPERACIÓN (nunca el total completo de la venta, por si ya hubo
+      // una cancelación parcial anterior) — movimiento de caja, mismo mecanismo
+      // que un retiro (resta del efectivo esperado), ligado a la orden. ----
+      if (valorTotalMerma > 0) {
+        await client.query(
+          `INSERT INTO movimientos_caja (tipo, monto, motivo, responsable_id, confirmado, confirmado_por, fecha_confirmacion, orden_id)
          VALUES ('reembolso', $1, $2, $3, TRUE, $3, NOW(), $4)`,
-        [valorTotalMerma, `Reembolso por cancelación — orden ${numeroOrden}`, req.usuario.id, ordenId]
+          [
+            valorTotalMerma,
+            `Reembolso por cancelación — orden ${numeroOrden}`,
+            req.usuario.id,
+            ordenId,
+          ],
+        );
+      }
+
+      // Se vuelve a leer la venta (puede haber cambiado de estado arriba) para
+      // que la respuesta refleje su estado REAL, no la foto de antes de cancelar.
+      const ventaFinal = await client.query(
+        "SELECT * FROM ventas WHERE id = $1",
+        [id],
       );
-    }
 
-    // Se vuelve a leer la venta (puede haber cambiado de estado arriba) para
-    // que la respuesta refleje su estado REAL, no la foto de antes de cancelar.
-    const ventaFinal = await client.query('SELECT * FROM ventas WHERE id = $1', [id]);
-
-    await client.query('COMMIT');
-    res.json({
-      ...ventaFinal.rows[0],
-      cancelacion_total: lineasRestantes === 0,
-      productos_cancelados: lineasACancelar.length,
-      mermas_generadas: lineasACancelar.length,
-      mermas_valor_total: valorTotalMerma.toFixed(2),
-      insumos_restituidos: insumosRestituidos,
-      monto_reembolso: valorTotalMerma.toFixed(2),
-    });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    if (error.status) {
-      return res.status(error.status).json({ error: error.mensaje });
+      await client.query("COMMIT");
+      res.json({
+        ...ventaFinal.rows[0],
+        cancelacion_total: lineasRestantes === 0,
+        productos_cancelados: lineasACancelar.length,
+        mermas_generadas: lineasACancelar.length,
+        mermas_valor_total: valorTotalMerma.toFixed(2),
+        insumos_restituidos: insumosRestituidos,
+        monto_reembolso: valorTotalMerma.toFixed(2),
+        lealtad_revertida: lealtadRevertida,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error.status) {
+        return res.status(error.status).json({ error: error.mensaje });
+      }
+      console.error(error);
+      res.status(500).json({ error: "Error al cancelar la venta." });
+    } finally {
+      client.release();
     }
-    console.error(error);
-    res.status(500).json({ error: 'Error al cancelar la venta.' });
-  } finally {
-    client.release();
-  }
-});
+  },
+);
 
 module.exports = router;

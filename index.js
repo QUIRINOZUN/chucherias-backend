@@ -29,25 +29,28 @@
 // =============================================================================
 
 // Carga el archivo .env ANTES de leer cualquier process.env.
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const pool = require('./db');
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const pool = require("./db");
 
 // Cada archivo de rutas exporta un Router de Express independiente.
-const authRoutes = require('./routes/auth');
-const usuariosRoutes = require('./routes/usuarios');
-const catalogoRoutes = require('./routes/catalogo');
-const ventasRoutes = require('./routes/ventas');
-const cajaRoutes = require('./routes/caja');
-const ordenesRoutes = require('./routes/ordenes');
-const insumosRoutes = require('./routes/insumos');
-const proveedoresRoutes = require('./routes/proveedores');
-const mermasRoutes = require('./routes/mermas');
-const empleadosRoutes = require('./routes/empleados');
-const asistenciasRoutes = require('./routes/asistencias');
-const horariosRoutes = require('./routes/horarios');
-const recetasRoutes = require('./routes/recetas');
+const authRoutes = require("./routes/auth");
+const usuariosRoutes = require("./routes/usuarios");
+const catalogoRoutes = require("./routes/catalogo");
+const ventasRoutes = require("./routes/ventas");
+const cajaRoutes = require("./routes/caja");
+const ordenesRoutes = require("./routes/ordenes");
+const insumosRoutes = require("./routes/insumos");
+const proveedoresRoutes = require("./routes/proveedores");
+const mermasRoutes = require("./routes/mermas");
+const empleadosRoutes = require("./routes/empleados");
+const asistenciasRoutes = require("./routes/asistencias");
+const horariosRoutes = require("./routes/horarios");
+const recetasRoutes = require("./routes/recetas");
+const clientesRoutes = require("./routes/clientes");
+const reportesRoutes = require("./routes/reportes");
+const checklistRoutes = require("./routes/checklist");
 
 const app = express();
 
@@ -60,8 +63,8 @@ const app = express();
 //   CORS_ORIGIN=http://localhost:4200,http://localhost:4300,https://mi-app.vercel.app
 // Si falta un origen en la lista, el frontend recibe un error de CORS aunque
 // la API esté funcionando bien.
-const origenesPermitidos = (process.env.CORS_ORIGIN || '')
-  .split(',')
+const origenesPermitidos = (process.env.CORS_ORIGIN || "")
+  .split(",")
   .map((origen) => origen.trim())
   .filter(Boolean);
 
@@ -76,7 +79,7 @@ app.use(
         callback(new Error(`Origen no permitido por CORS: ${origin}`));
       }
     },
-  })
+  }),
 );
 
 // Convierte automáticamente el cuerpo JSON de cada petición en req.body.
@@ -86,41 +89,47 @@ app.use(express.json());
 // Montaje de rutas
 // -----------------------------------------------------------------------------
 // Autenticación y usuarios (Sprint 1).
-app.use('/api/auth', authRoutes);
-app.use('/api/usuarios', usuariosRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/usuarios", usuariosRoutes);
 // El catálogo se monta en /api a secas porque sus rutas ya incluyen
 // /categorias y /productos en su propio archivo.
-app.use('/api', catalogoRoutes); // expone /api/categorias y /api/productos
+app.use("/api", catalogoRoutes); // expone /api/categorias y /api/productos
 // Punto de venta y caja (Sprint 1).
-app.use('/api/ventas', ventasRoutes);
-app.use('/api/caja', cajaRoutes);
+app.use("/api/ventas", ventasRoutes);
+app.use("/api/caja", cajaRoutes);
 // Comandas: seguimiento de cada pedido en cocina (Sprint 2).
-app.use('/api/ordenes', ordenesRoutes);
+app.use("/api/ordenes", ordenesRoutes);
 // Inventario: insumos, existencias calculadas y proveedores.
-app.use('/api/insumos', insumosRoutes);
-app.use('/api/proveedores', proveedoresRoutes);
+app.use("/api/insumos", insumosRoutes);
+app.use("/api/proveedores", proveedoresRoutes);
 // Consulta consolidada de mermas (de producto y de insumo, en un solo lugar).
-app.use('/api/mermas', mermasRoutes);
+app.use("/api/mermas", mermasRoutes);
 // Control de personal: empleados y sus asistencias (Sprint 3).
-app.use('/api/empleados', empleadosRoutes);
-app.use('/api/asistencias', asistenciasRoutes);
-app.use('/api/horarios', horariosRoutes);
-app.use('/api/recetas', recetasRoutes);
+app.use("/api/empleados", empleadosRoutes);
+app.use("/api/asistencias", asistenciasRoutes);
+app.use("/api/horarios", horariosRoutes);
+app.use("/api/recetas", recetasRoutes);
+// Clientes y programa de lealtad (Sprint 4).
+app.use("/api/clientes", clientesRoutes);
+// Reporte consolidado — ventas, inventario, personal y clientes (RF-26).
+app.use("/api/reportes", reportesRoutes);
+// Checklist de apertura/cierre (pedido explícito en la entrevista).
+app.use("/api/checklist", checklistRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)
 // -----------------------------------------------------------------------------
 // Ruta de prueba: confirma que el servidor está vivo
-app.get('/', (req, res) => {
-  res.json({ mensaje: 'API de CHUCHERIAS funcionando correctamente' });
+app.get("/", (req, res) => {
+  res.json({ mensaje: "API de CHUCHERIAS funcionando correctamente" });
 });
 
 // Ruta de prueba: confirma que la conexión a Neon funciona.
 // Útil para "despertar" la base de datos gratuita antes de la primera venta
 // del día (Neon duerme tras 5 minutos de inactividad).
-app.get('/api/ping-db', async (req, res) => {
+app.get("/api/ping-db", async (req, res) => {
   try {
-    const result = await pool.query('SELECT NOW()');
+    const result = await pool.query("SELECT NOW()");
     res.json({ conectado: true, hora_servidor: result.rows[0].now });
   } catch (error) {
     console.error(error);
@@ -132,5 +141,7 @@ app.get('/api/ping-db', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en el puerto ${PORT}`);
-  console.log(`Orígenes permitidos (CORS): ${origenesPermitidos.join(', ') || '(ninguno configurado)'}`);
+  console.log(
+    `Orígenes permitidos (CORS): ${origenesPermitidos.join(", ") || "(ninguno configurado)"}`,
+  );
 });
