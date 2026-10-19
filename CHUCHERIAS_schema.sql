@@ -103,7 +103,11 @@ CREATE TABLE productos (
     -- 2026-10-09: id que Cloudinary necesita para borrar/reemplazar la foto
     -- sin dejar archivos huérfanos en la cuenta — ver utils/cloudinary.js.
     imagen_public_id   VARCHAR(255),
-    activo             BOOLEAN NOT NULL DEFAULT TRUE
+    activo             BOOLEAN NOT NULL DEFAULT TRUE,
+    -- 2026-10-19: FALSE para productos que no pasan por cocina (bebidas
+    -- embotelladas, botanas de bolsa) — su orden salta directo a
+    -- 'por_entregar' en vez de pasar por el tablero de cocina.
+    requiere_preparacion BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE variantes_producto (
@@ -226,6 +230,10 @@ CREATE TABLE ordenes (
     fecha_creacion TIMESTAMP NOT NULL DEFAULT NOW(),
     creado_por     INTEGER NOT NULL REFERENCES usuarios(id),
     repartidor_id  INTEGER REFERENCES empleados(id),
+    -- 2026-10-19: qué auxiliar de cocina está trabajando esta orden (los 2
+    -- cocineros reales llevan cada uno órdenes independientes "en proceso").
+    -- NULL = sin asignar todavía.
+    cocinero_id    INTEGER REFERENCES empleados(id),
     -- 2026-10-11/12: nombre, dirección y teléfono del cliente, SOLO para
     -- tipo_entrega = 'domicilio' (NULL en presencial) — ver routes/ventas.js,
     -- validación al registrar la venta.

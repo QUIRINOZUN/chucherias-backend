@@ -73,6 +73,7 @@ const {
   fechaValida,
 } = require("../utils/fecha");
 const {
+  calcularInsumosDeOrden,
   calcularInsumosDeLineas,
   registrarMovimientosInventario,
 } = require("../utils/inventarioOrden");
@@ -169,15 +170,24 @@ router.post(
       await client.query("BEGIN");
 
       // ---- 1) Precios reales, leídos del servidor ---------------------------
+      // Se trae también productos.requiere_preparacion (2026-10-19): decide
+      // más abajo si esta orden nace en 'sin_preparar' (normal) o salta
+      // directo a 'por_entregar' — ver sección 3.5.
       const variantesResultado = await client.query(
-        `SELECT id, precio FROM variantes_producto WHERE id = ANY($1::int[])`,
+        `SELECT vp.id, vp.precio, p.requiere_preparacion
+         FROM variantes_producto vp
+         JOIN productos p ON p.id = vp.producto_id
+         WHERE vp.id = ANY($1::int[])`,
         [varianteIds],
       );
 
-      // Diccionario { variante_id: precio } para consultar cada precio rápido.
+      // Diccionarios { variante_id: precio / requiere_preparacion } para
+      // consultar cada dato rápido, sin repetir la consulta por línea.
       const precioPorVariante = {};
+      const requierePreparacionPorVariante = {};
       for (const fila of variantesResultado.rows) {
         precioPorVariante[fila.id] = Number(fila.precio);
+        requierePreparacionPorVariante[fila.id] = fila.requiere_preparacion;
       }
 
       // Si alguna variante enviada no existe, se aborta la venta completa.
@@ -189,6 +199,17 @@ router.post(
           };
         }
       }
+
+      // Productos sin preparación (RF nuevo, 2026-10-19): bebidas
+      // embotelladas, botanas de bolsa — no pasan por cocina. Si TODOS los
+      // productos de esta orden son así, la orden nace directo en
+      // 'por_entregar' (ver sección 2) en vez de esperar en el tablero de
+      // cocina. Una orden MIXTA (aunque sea un solo producto que sí requiera
+      // preparación) sigue el flujo normal completo — el estado es de la
+      // orden entera, no por línea.
+      const todosSinPreparacion = varianteIds.every(
+        (id) => requierePreparacionPorVariante[id] === false,
+      );
 
       // Si viene un cliente de lealtad, debe existir ANTES de insertar la
       // orden (que lo referencia por FK) — si no, Postgres rechazaría el
@@ -225,17 +246,24 @@ router.post(
 
       // ---- 2) La orden (la comanda que verá la cocina) ----------------------
       // Nace en 'sin_preparar' (Sprint 2): aparece de inmediato en el tablero
-      // de comandas. `creado_por` guarda quién la registró (viene del token).
+      // de comandas. EXCEPCIÓN (2026-10-19): si TODOS sus productos tienen
+      // requiere_preparacion = FALSE, nace directo en 'por_entregar' — nunca
+      // pasa por el tablero de cocina (ver sección 1 y 3.5). `creado_por`
+      // guarda quién la registró (viene del token).
+      const estadoInicial = todosSinPreparacion
+        ? "por_entregar"
+        : "sin_preparar";
       const orden = await client.query(
         `INSERT INTO ordenes
          (numero_orden, cliente_id, tipo_entrega, estado, creado_por,
           cliente_nombre, cliente_direccion, cliente_telefono, repartidor_id)
-       VALUES ($1, $2, $3, 'sin_preparar', $4, $5, $6, $7, $8)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
         [
           generarNumeroOrden(),
           cliente_id || null,
           tipo_entrega,
+          estadoInicial,
           req.usuario.id,
           clienteNombre,
           clienteDireccion,
@@ -244,12 +272,16 @@ router.post(
         ],
       );
 
-      // RF-08: abre el primer renglón de tiempo por estado ('sin_preparar'),
-      // que routes/ordenes.js irá cerrando y reabriendo en cada avance.
+      // RF-08: abre el primer renglón de tiempo por estado, que
+      // routes/ordenes.js irá cerrando y reabriendo en cada avance. Si la
+      // orden nació directo en 'por_entregar' (sección 1), nunca pasó de
+      // verdad por 'sin_preparar'/'preparando' — se abre el renglón del
+      // estado real en el que nació, para no inventar tiempos de estados
+      // que esta orden nunca tuvo.
       await client.query(
         `INSERT INTO orden_estado_historial (orden_id, estado, fecha_inicio, responsable_id)
-       VALUES ($1, 'sin_preparar', NOW(), $2)`,
-        [orden.rows[0].id, req.usuario.id],
+       VALUES ($1, $2, NOW(), $3)`,
+        [orden.rows[0].id, estadoInicial, req.usuario.id],
       );
 
       // ---- 3) Detalle de la orden + cálculo del subtotal --------------------
@@ -337,6 +369,29 @@ router.post(
             ],
           );
         }
+      }
+
+      // ---- 3.5) Descuento inmediato para productos sin preparación ----------
+      // (2026-10-19) Esta orden nació directo en 'por_entregar' (sección 2) —
+      // nunca va a pasar por el PATCH /api/ordenes/:id/estado que normalmente
+      // dispara el descuento de inventario al entrar a 'preparando' (ver
+      // routes/ordenes.js). Se descuenta AQUÍ, con el mismo mecanismo
+      // (calcularInsumosDeOrden + registrarMovimientosInventario), para que
+      // una bebida embotellada o una botana de bolsa sí reste su inventario
+      // aunque la comanda nunca "entre a cocina". Se corre DESPUÉS del ciclo
+      // de arriba porque calcularInsumosDeOrden lee orden_detalle y
+      // orden_detalle_insumos, que recién se acaban de insertar.
+      if (todosSinPreparacion) {
+        const insumosOrden = await calcularInsumosDeOrden(
+          client,
+          orden.rows[0].id,
+        );
+        await registrarMovimientosInventario(client, insumosOrden, {
+          tipo: "salida",
+          responsableId: req.usuario.id,
+          motivo: `Venta ${orden.rows[0].numero_orden}`,
+          ordenId: orden.rows[0].id,
+        });
       }
 
       // ---- 4) Lealtad (RF-21/RF-22, 2026-10-15) -----------------------------
@@ -724,6 +779,15 @@ router.patch(
       // 'sin_preparar': nunca se descontó nada, no hay nada que rescatar ni perder.
       // 'por_entregar' / 'entregado': el producto ya está armado — todo el insumo
       // ya descontado queda como consumido, no se restituye nada automáticamente.
+      //
+      // NOTA (2026-10-19): una orden de productos SIN preparación (ver sección
+      // "3.5" de POST /, arriba) nace directo en 'por_entregar' — si se
+      // cancela, cae en esta misma rama ("ya está armado", merma automática
+      // completa, sin checklist de rescate). Es una simplificación a
+      // propósito: aunque técnicamente una bebida embotellada sin abrir SÍ
+      // podría regresar al inventario, construir una tercera rama de
+      // cancelación solo para este caso quedó fuera de alcance — se puede
+      // revisar si en la práctica resulta molesto.
 
       // ---- ¿Queda alguna línea activa? Si no, la venta y la orden se cancelan
       // por completo (igual que antes de este ajuste) ----

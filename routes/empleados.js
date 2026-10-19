@@ -3,9 +3,11 @@
 // =============================================================================
 // Endpoints (prefijo /api/empleados), todos exigen sesión. Solo
 // administrador/encargado (mismo criterio que usuarios/insumos/proveedores),
-// EXCEPTO /repartidores (también cajero, ver nota junto a esa ruta).
+// EXCEPTO /repartidores (también cajero) y /cocineros (también auxiliar) —
+// ver la nota junto a cada ruta.
 //
 //   GET   /repartidores → repartidores activos, lista ligera (2026-10-16, RF: "nombre del repartidor")
+//   GET   /cocineros   → auxiliares de cocina activos, lista ligera (2026-10-19, asignación por orden en Comandas)
 //   GET   /            → lista de empleados (activos por default)
 //   POST  /             → dar de alta un empleado
 //   PATCH /:id          → editar nombre, puesto, usuario_id o fecha_ingreso
@@ -44,6 +46,32 @@ router.get(
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: "Error al obtener los repartidores." });
+    }
+  },
+);
+
+// GET /api/empleados/cocineros
+// Lista ligera (solo id + nombre) de auxiliares de cocina activos, para el
+// selector de "quién está preparando esta orden" en Comandas (2026-10-19:
+// el organigrama real tiene 2 auxiliares de cocina, cada uno trabajando una
+// orden independiente). Registrada ANTES del requiereRol de abajo, a
+// propósito: el auxiliar (quien de verdad cocina) necesita esta lista para
+// asignarse una orden, pero no tiene acceso a la gestión completa de
+// empleados — mismo patrón que /repartidores.
+router.get(
+  "/cocineros",
+  requiereRol("administrador", "encargado", "auxiliar"),
+  async (req, res) => {
+    try {
+      const resultado = await pool.query(
+        `SELECT id, nombre FROM empleados
+       WHERE activo = TRUE AND puesto ILIKE '%cocina%'
+       ORDER BY nombre`,
+      );
+      res.json(resultado.rows);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Error al obtener los cocineros." });
     }
   },
 );

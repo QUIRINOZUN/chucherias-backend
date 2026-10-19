@@ -10,6 +10,8 @@
 //                             encargado, cajero, auxiliar)
 //   PATCH /:id/estado       → avanzar la orden un paso (administrador,
 //                             encargado, auxiliar)
+//   PATCH /:id/cocinero     → asignar/cambiar el auxiliar de cocina a cargo
+//                             (administrador, encargado, auxiliar — 2026-10-19)
 //   GET   /:id/tiempos      → cuánto duró la orden en cada estado, para
 //                             reportes (administrador, encargado — RF-08)
 //   GET   /:id/insumos-descontados → qué insumos (y cuánto) descontarían
@@ -20,6 +22,23 @@
 //   sin_preparar → preparando → por_entregar → entregado
 //   'cancelada' NO forma parte de esta secuencia: se asigna al cancelar la
 //   venta (PATCH /api/ventas/:id/cancelar) y ya no se puede avanzar.
+//
+// EXCEPCIÓN (2026-10-19): una orden cuyos productos NO requieren preparación
+// (bebidas embotelladas, botanas de bolsa — productos.requiere_preparacion =
+// FALSE) nunca pasa por 'sin_preparar'/'preparando': nace directo en
+// 'por_entregar' (ver routes/ventas.js, sección "productos sin
+// preparación") y nunca aparece en las dos primeras columnas del tablero de
+// cocina. Esta excepción se decide al REGISTRAR la venta (ahí es donde se
+// conocen los productos de la orden); este archivo no necesita saber nada de
+// `requiere_preparacion` — solo recibe el estado inicial ya resuelto.
+//
+// COCINERO ASIGNADO (2026-10-19): el organigrama real tiene 2 auxiliares de
+// cocina, cada uno trabajando una orden independiente "en proceso" —
+// `ordenes.cocinero_id` (FK a empleados, nullable) indica cuál. Es
+// informativo/organizativo, no afecta el descuento de inventario ni el
+// flujo de estados — mismo patrón que `repartidor_id` (ver PATCH
+// /:id/repartidor más abajo), solo que sin restricción de tipo_entrega:
+// cualquier orden que SÍ requiere cocina puede tener un cocinero asignado.
 //
 // QUIÉN PUEDE QUÉ
 //   Ver el tablero:   administrador, encargado, cajero, auxiliar
@@ -82,6 +101,9 @@ const ROLES_QUE_AVANZAN = ["administrador", "encargado", "auxiliar"];
 // mismos roles que ya pueden registrar una venta (routes/ventas.js), no el
 // auxiliar.
 const ROLES_QUE_ASIGNAN_REPARTIDOR = ["administrador", "encargado", "cajero"];
+// Asignar cocinero SÍ es una decisión de cocina (quién está trabajando qué
+// orden) — mismos roles que avanzan comandas.
+const ROLES_QUE_ASIGNAN_COCINERO = ["administrador", "encargado", "auxiliar"];
 
 // El flujo de una comanda avanza en un solo sentido; 'cancelada' se maneja
 // aparte, a través de la cancelación de la venta.
@@ -111,9 +133,11 @@ router.get("/", requiereRol(...ROLES_QUE_VEN), async (req, res) => {
     const ordenes = await pool.query(
       `SELECT o.id, o.numero_orden, o.estado, o.tipo_entrega, o.fecha_creacion,
               o.cliente_nombre, o.cliente_direccion, o.cliente_telefono,
-              o.repartidor_id, e.nombre AS repartidor_nombre
+              o.repartidor_id, e.nombre AS repartidor_nombre,
+              o.cocinero_id, ec.nombre AS cocinero_nombre
        FROM ordenes o
        LEFT JOIN empleados e ON e.id = o.repartidor_id
+       LEFT JOIN empleados ec ON ec.id = o.cocinero_id
        WHERE o.estado = ANY($1::varchar[])
        ORDER BY o.fecha_creacion ASC`,
       [estadosSolicitados],
@@ -289,11 +313,9 @@ router.patch(
         return res.status(404).json({ error: "La orden no existe." });
       }
       if (orden.rows[0].tipo_entrega !== "domicilio") {
-        return res
-          .status(400)
-          .json({
-            error: "Solo las órdenes a domicilio llevan repartidor asignado.",
-          });
+        return res.status(400).json({
+          error: "Solo las órdenes a domicilio llevan repartidor asignado.",
+        });
       }
 
       if (repartidor_id !== null) {
@@ -302,11 +324,9 @@ router.patch(
           [repartidor_id],
         );
         if (empleado.rows.length === 0) {
-          return res
-            .status(400)
-            .json({
-              error: "El repartidor seleccionado no existe o no está activo.",
-            });
+          return res.status(400).json({
+            error: "El repartidor seleccionado no existe o no está activo.",
+          });
         }
       }
 
@@ -318,6 +338,51 @@ router.patch(
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: "Error al asignar el repartidor." });
+    }
+  },
+);
+
+// PATCH /api/ordenes/:id/cocinero
+// Asigna o cambia el auxiliar de cocina a cargo de la orden (2026-10-19: el
+// organigrama real tiene 2 auxiliares, cada uno trabaja una orden
+// independiente "en proceso"). A diferencia del repartidor, no está
+// restringido a ningún tipo_entrega — cualquier orden puede tener cocinero.
+// Cuerpo: { cocinero_id: number | null } — null quita la asignación.
+router.patch(
+  "/:id/cocinero",
+  requiereRol(...ROLES_QUE_ASIGNAN_COCINERO),
+  async (req, res) => {
+    const { id } = req.params;
+    const { cocinero_id } = req.body;
+
+    try {
+      const orden = await pool.query("SELECT id FROM ordenes WHERE id = $1", [
+        id,
+      ]);
+      if (orden.rows.length === 0) {
+        return res.status(404).json({ error: "La orden no existe." });
+      }
+
+      if (cocinero_id !== null) {
+        const empleado = await pool.query(
+          `SELECT 1 FROM empleados WHERE id = $1 AND activo = TRUE AND puesto ILIKE '%cocina%'`,
+          [cocinero_id],
+        );
+        if (empleado.rows.length === 0) {
+          return res.status(400).json({
+            error: "El cocinero seleccionado no existe o no está activo.",
+          });
+        }
+      }
+
+      const resultado = await pool.query(
+        "UPDATE ordenes SET cocinero_id = $1 WHERE id = $2 RETURNING id, cocinero_id",
+        [cocinero_id, id],
+      );
+      res.json(resultado.rows[0]);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Error al asignar el cocinero." });
     }
   },
 );

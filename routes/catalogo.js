@@ -48,6 +48,13 @@
 // NINGÚN código de negocio lee (ni el POS, ni el descuento de inventario) —
 // se completa con 0 al crear un producto nuevo y se deja así a propósito; el
 // precio real de cada presentación SIEMPRE vive en variantes_producto.precio.
+//
+// `productos.requiere_preparacion` (2026-10-19, DEFAULT TRUE): FALSE para
+// productos que no pasan por cocina (bebidas embotelladas, botanas de
+// bolsa) — lo usa routes/ventas.js al registrar la venta para decidir si la
+// orden nace en 'sin_preparar' (normal) o directo en 'por_entregar' (salta
+// el tablero de cocina). Este archivo solo lo guarda/expone, no decide nada
+// con él.
 // =============================================================================
 const express = require("express");
 const multer = require("multer");
@@ -189,6 +196,7 @@ router.get("/productos", async (req, res) => {
   try {
     const productos = await pool.query(
       `SELECT p.id, p.nombre, p.descripcion, p.imagen_url, p.activo,
+              p.requiere_preparacion,
               c.id AS categoria_id, c.nombre AS categoria
        FROM productos p
        JOIN categorias c ON c.id = p.categoria_id
@@ -242,6 +250,14 @@ router.post("/productos", GESTION, async (req, res) => {
       .status(400)
       .json({ error: "La categoría y el nombre son obligatorios." });
   }
+  // requiere_preparacion (2026-10-19): TRUE por default si no llega nada —
+  // la inmensa mayoría del catálogo SÍ pasa por cocina; solo los productos
+  // que de verdad no necesitan preparación (bebidas embotelladas, botanas de
+  // bolsa) se marcan en FALSE desde el formulario.
+  const requierePreparacion =
+    req.body.requiere_preparacion === undefined
+      ? true
+      : !!req.body.requiere_preparacion;
   try {
     const categoria = await pool.query(
       "SELECT id FROM categorias WHERE id = $1",
@@ -254,14 +270,15 @@ router.post("/productos", GESTION, async (req, res) => {
     }
     // precio_base: ver nota del encabezado — ningún código de negocio la lee.
     const resultado = await pool.query(
-      `INSERT INTO productos (categoria_id, nombre, descripcion, precio_base, imagen_url, activo)
-       VALUES ($1, $2, $3, 0, $4, TRUE)
-       RETURNING id, categoria_id, nombre, descripcion, imagen_url, activo`,
+      `INSERT INTO productos (categoria_id, nombre, descripcion, precio_base, imagen_url, activo, requiere_preparacion)
+       VALUES ($1, $2, $3, 0, $4, TRUE, $5)
+       RETURNING id, categoria_id, nombre, descripcion, imagen_url, activo, requiere_preparacion`,
       [
         categoria_id,
         nombre.trim(),
         descripcion?.trim() || null,
         imagen_url?.trim() || null,
+        requierePreparacion,
       ],
     );
     res.status(201).json({ ...resultado.rows[0], variantes: [] });
@@ -307,12 +324,24 @@ router.patch("/productos/:id", GESTION, async (req, res) => {
       imagen_url !== undefined
         ? imagen_url?.trim() || null
         : productoActual.imagen_url;
+    // requiere_preparacion: undefined = no tocar (conserva el valor actual).
+    const nuevoRequierePreparacion =
+      req.body.requiere_preparacion === undefined
+        ? productoActual.requiere_preparacion
+        : !!req.body.requiere_preparacion;
 
     const resultado = await pool.query(
-      `UPDATE productos SET categoria_id = $1, nombre = $2, descripcion = $3, imagen_url = $4
-       WHERE id = $5
-       RETURNING id, categoria_id, nombre, descripcion, imagen_url, activo`,
-      [nuevaCategoriaId, nuevoNombre, nuevaDescripcion, nuevaImagen, id],
+      `UPDATE productos SET categoria_id = $1, nombre = $2, descripcion = $3, imagen_url = $4, requiere_preparacion = $5
+       WHERE id = $6
+       RETURNING id, categoria_id, nombre, descripcion, imagen_url, activo, requiere_preparacion`,
+      [
+        nuevaCategoriaId,
+        nuevoNombre,
+        nuevaDescripcion,
+        nuevaImagen,
+        nuevoRequierePreparacion,
+        id,
+      ],
     );
     res.json(resultado.rows[0]);
   } catch (error) {
@@ -350,11 +379,9 @@ router.patch("/productos/:id/activo", GESTION, async (req, res) => {
 router.post("/productos/:id/imagen", GESTION, (req, res) => {
   uploadImagen.single("imagen")(req, res, async (errorMulter) => {
     if (errorMulter) {
-      return res
-        .status(400)
-        .json({
-          error: errorMulter.message || "No se pudo procesar el archivo.",
-        });
+      return res.status(400).json({
+        error: errorMulter.message || "No se pudo procesar el archivo.",
+      });
     }
     if (!req.file) {
       return res
