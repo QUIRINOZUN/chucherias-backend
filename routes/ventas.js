@@ -348,6 +348,12 @@ router.post(
       // aquí donde se conoce el subtotal real de ESTA compra.
       let descuentoLealtad = 0;
       let infoLealtad = null;
+      // Ciclo de lealtad a mostrar en el ticket (2026-10-17, ver "potenciar
+      // ticket" más abajo): el número de visita del ciclo DESPUÉS de esta
+      // compra, para que el comprobante siempre pueda dibujar el avance
+      // "X de 10" aunque esta compra en particular no haya contado una
+      // visita nueva (ej. segunda compra del mismo cliente el mismo día).
+      let visitasLealtadParaTicket = null;
       if (cliente_id) {
         // FOR UPDATE: dos cobros simultáneos del mismo cliente no pueden
         // pisarse el contador de visitas.
@@ -362,6 +368,7 @@ router.post(
           };
         }
         const visitasActuales = clienteFila.rows[0].visitas_acumuladas;
+        visitasLealtadParaTicket = visitasActuales;
 
         const yaVisitoHoy = await client.query(
           `SELECT 1 FROM lealtad_historial
@@ -395,6 +402,7 @@ router.post(
             nuevasVisitas,
             descripcionDescuento,
           };
+          visitasLealtadParaTicket = nuevasVisitas;
         }
       }
 
@@ -451,6 +459,10 @@ router.post(
       res.status(201).json({
         orden: orden.rows[0],
         venta: venta.rows[0],
+        // Solo informativo para el ticket (avance del ciclo "X de 10"); el
+        // descuento real ya vive en venta.descuento_lealtad, esto nunca se
+        // vuelve a usar para calcular dinero.
+        visitas_lealtad: visitasLealtadParaTicket,
       });
     } catch (error) {
       // Cualquier fallo deshace TODO lo escrito arriba: nunca queda una orden
