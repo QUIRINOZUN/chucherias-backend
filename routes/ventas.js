@@ -3,9 +3,25 @@
 // =============================================================================
 // Endpoints (prefijo /api/ventas), todos exigen sesión:
 //   POST  /                → registrar una venta (administrador, encargado, cajero)
-//   GET   /?fecha=…        → ventas de un día del negocio      (administrador, encargado)
+//   GET   /?desde=&hasta=&estado=&metodo_pago=&tipo_entrega=&buscar=
+//                           → consulta de tickets con filtros, todos opcionales
+//                             y combinables; sin ninguno, todo el histórico
+//                             (mismo criterio que mermas/ventas-especiales) —
+//                             (administrador, encargado). Ver "2026-10-22:
+//                             de 'Ventas de hoy' a 'Ventas'" más abajo.
 //   PATCH /:id/cancelar    → cancelar una venta, total o PARCIAL (RF-03)
 //                            (administrador, encargado)
+//
+// 2026-10-22: de "Ventas de hoy" a "Ventas" — el módulo pasó de mostrar
+// solo el día en curso a ser la consulta general de tickets (RF implícito:
+// poder localizar cualquier venta pasada, no solo la de hoy). `GET /` dejó
+// de exigir ni asumir ninguna fecha por default — antes devolvía SIEMPRE el
+// día del negocio en curso (`fecha` por default a `fechaHoyNegocio()`); el
+// filtro de fecha ahora es un rango (`desde`/`hasta`) opcional, igual que ya
+// usan mermas/caja (cortes)/reportes/ventas especiales. `buscar` encuentra
+// un ticket por folio, cajero, cliente (de lealtad o de domicilio, nombre o
+// teléfono) o por el nombre de un producto vendido — pensado para "¿quién
+// compró X?" o "busco el ticket de Fulano" sin saber la fecha exacta.
 //
 // CONCEPTOS CLAVE
 //   Una venta se guarda en TRES tablas que siempre se escriben juntas:
@@ -536,25 +552,51 @@ router.post(
   },
 );
 
-// GET /api/ventas?fecha=YYYY-MM-DD
-// Lista las ventas del día (o de la fecha indicada) con sus productos,
-// más recientes primero. Es información financiera: solo administrador y
-// encargado (RNF-03), igual que /api/caja/cortes.
-// "Del día" significa el día del negocio en hora de Durango (utils/fecha.js).
-router.get("/", requiereRol("administrador", "encargado"), async (req, res) => {
-  const fecha = req.query.fecha || fechaHoyNegocio();
+const ESTADOS_VENTA_VALIDOS = ["completada", "cancelada"];
+const METODOS_PAGO_VALIDOS = ["efectivo", "transferencia"];
+const TIPOS_ENTREGA_VALIDOS = ["presencial", "domicilio"];
 
-  if (!fechaValida(fecha)) {
+// GET /api/ventas?desde=&hasta=&estado=&metodo_pago=&tipo_entrega=&buscar=
+// Consulta de tickets con sus productos, más recientes primero. Todos los
+// filtros son opcionales y combinables; sin ninguno, TODO el histórico
+// (mismo criterio que mermas/ventas-especiales — ver nota de cabecera del
+// archivo, "2026-10-22: de 'Ventas de hoy' a 'Ventas'"). `desde`/`hasta`
+// comparan contra el día del negocio en hora de Durango (utils/fecha.js),
+// igual que ya hacen caja (cortes) y mermas. `buscar` encuentra un ticket
+// por folio, cajero, cliente (lealtad o domicilio, nombre o teléfono) o por
+// el nombre de un producto/variante vendido en esa orden. Es información
+// financiera: solo administrador y encargado (RNF-03).
+router.get("/", requiereRol("administrador", "encargado"), async (req, res) => {
+  const { desde, hasta, estado, metodo_pago, tipo_entrega, buscar } = req.query;
+
+  if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
     return res
       .status(400)
-      .json({ error: "La fecha debe tener el formato AAAA-MM-DD." });
+      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+  }
+  if (estado && !ESTADOS_VENTA_VALIDOS.includes(estado)) {
+    return res.status(400).json({
+      error: `El estado debe ser uno de: ${ESTADOS_VENTA_VALIDOS.join(", ")}.`,
+    });
+  }
+  if (metodo_pago && !METODOS_PAGO_VALIDOS.includes(metodo_pago)) {
+    return res.status(400).json({
+      error: `El método de pago debe ser uno de: ${METODOS_PAGO_VALIDOS.join(", ")}.`,
+    });
+  }
+  if (tipo_entrega && !TIPOS_ENTREGA_VALIDOS.includes(tipo_entrega)) {
+    return res.status(400).json({
+      error: `El tipo de entrega debe ser uno de: ${TIPOS_ENTREGA_VALIDOS.join(", ")}.`,
+    });
   }
 
+  const busquedaTexto = buscar?.trim() || null;
+
   try {
-    // Consulta 1: las ventas del día con datos de su orden, el cajero, —si
-    // fue cancelada— quién la canceló (LEFT JOIN: solo existe en canceladas),
-    // y cuántas mermas (y cuántos pesos) generó esa cancelación (0 en una
-    // venta no cancelada).
+    // Consulta 1: las ventas que cumplen los filtros, con datos de su orden,
+    // el cajero, —si fue cancelada— quién la canceló (LEFT JOIN: solo existe
+    // en canceladas), y cuántas mermas (y cuántos pesos) generó esa
+    // cancelación (0 en una venta no cancelada).
     const ventas = await pool.query(
       `SELECT v.*, o.id AS orden_id, o.numero_orden, o.tipo_entrega, o.estado AS estado_orden,
               o.cliente_nombre, o.cliente_direccion, o.cliente_telefono,
@@ -582,9 +624,35 @@ router.get("/", requiereRol("administrador", "encargado"), async (req, res) => {
        LEFT JOIN usuarios uc ON uc.id = v.cancelado_por
        LEFT JOIN clientes c ON c.id = o.cliente_id
        LEFT JOIN empleados e ON e.id = o.repartidor_id
-       WHERE ${diaNegocioSql("v.fecha")} = $1
+       WHERE ($1::date IS NULL OR ${diaNegocioSql("v.fecha")} >= $1::date)
+         AND ($2::date IS NULL OR ${diaNegocioSql("v.fecha")} <= $2::date)
+         AND ($3::text IS NULL OR v.estado = $3)
+         AND ($4::text IS NULL OR v.metodo_pago = $4)
+         AND ($5::text IS NULL OR o.tipo_entrega = $5)
+         AND (
+           $6::text IS NULL
+           OR o.numero_orden ILIKE '%' || $6 || '%'
+           OR u.nombre ILIKE '%' || $6 || '%'
+           OR c.nombre_completo ILIKE '%' || $6 || '%'
+           OR o.cliente_nombre ILIKE '%' || $6 || '%'
+           OR o.cliente_telefono ILIKE '%' || $6 || '%'
+           OR EXISTS (
+             SELECT 1 FROM orden_detalle od2
+             JOIN variantes_producto vp2 ON vp2.id = od2.variante_id
+             JOIN productos p2 ON p2.id = vp2.producto_id
+             WHERE od2.orden_id = o.id
+               AND (p2.nombre ILIKE '%' || $6 || '%' OR vp2.nombre ILIKE '%' || $6 || '%')
+           )
+         )
        ORDER BY v.fecha DESC`,
-      [fecha],
+      [
+        desde || null,
+        hasta || null,
+        estado || null,
+        metodo_pago || null,
+        tipo_entrega || null,
+        busquedaTexto,
+      ],
     );
 
     if (ventas.rows.length === 0) {
