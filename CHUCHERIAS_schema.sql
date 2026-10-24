@@ -336,6 +336,39 @@ CREATE TABLE lealtad_historial (
     visita_numero INTEGER
 );
 
+-- ===================== VENTAS ESPECIALES (agendar y cotizar) =====================
+
+-- Ventas especiales (2026-10-22): agendar y cotizar pedidos grandes
+-- (desayunos, comidas, sorpresas especiales) con el menú completo, por
+-- adelantado. A propósito NO es una venta real todavía — no toca caja,
+-- inventario ni comandas; ver 2026-10-22_ventas_especiales.sql.
+CREATE TABLE ventas_especiales (
+    id                   SERIAL PRIMARY KEY,
+    cliente_nombre       VARCHAR(150) NOT NULL,
+    cliente_telefono     VARCHAR(20),
+    cliente_direccion    VARCHAR(255),
+    tipo                 VARCHAR(20) NOT NULL DEFAULT 'otro'
+                         CHECK (tipo IN ('desayuno','comida','sorpresa','otro')),
+    fecha_evento         DATE NOT NULL,
+    hora_evento          TIME,
+    estado               VARCHAR(20) NOT NULL DEFAULT 'cotizada'
+                         CHECK (estado IN ('cotizada','confirmada','entregada','cancelada')),
+    notas                VARCHAR(500),
+    subtotal             NUMERIC(10,2) NOT NULL DEFAULT 0,
+    creado_por           INTEGER NOT NULL REFERENCES usuarios(id),
+    fecha_creacion       TIMESTAMP NOT NULL DEFAULT NOW(),
+    fecha_actualizacion  TIMESTAMP
+);
+
+CREATE TABLE venta_especial_detalle (
+    id                   SERIAL PRIMARY KEY,
+    venta_especial_id    INTEGER NOT NULL REFERENCES ventas_especiales(id),
+    variante_id          INTEGER NOT NULL REFERENCES variantes_producto(id),
+    cantidad             INTEGER NOT NULL DEFAULT 1 CHECK (cantidad > 0),
+    precio_unitario      NUMERIC(10,2) NOT NULL,
+    notas                VARCHAR(255)
+);
+
 -- ===================== MERMAS Y CAJA =====================
 
 -- Producto o insumo que se perdió sin poder venderse. Se llena manualmente

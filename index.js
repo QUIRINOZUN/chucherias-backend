@@ -53,6 +53,7 @@ const clientesRoutes = require("./routes/clientes");
 const reportesRoutes = require("./routes/reportes");
 const checklistRoutes = require("./routes/checklist");
 const nominaRoutes = require("./routes/nomina");
+const ventasEspecialesRoutes = require("./routes/ventasEspeciales");
 
 const app = express();
 
@@ -133,6 +134,8 @@ app.use("/api/reportes", reportesRoutes);
 app.use("/api/checklist", checklistRoutes);
 // Nómina por horas trabajadas (pago del personal).
 app.use("/api/nomina", nominaRoutes);
+// Ventas especiales: agendar y cotizar desayunos, comidas y sorpresas.
+app.use("/api/ventas-especiales", ventasEspecialesRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)
