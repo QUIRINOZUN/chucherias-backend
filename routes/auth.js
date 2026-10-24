@@ -29,15 +29,29 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const pool = require('../db');
 const { verificarToken } = require('../middleware/auth');
 
 const router = express.Router();
 
+// Límite de intentos de login: 10 intentos por IP cada 15 minutos. Es la
+// única ruta pública del sistema (no exige sesión previa), así que es el
+// único punto donde alguien podría probar fuerza bruta contra una cuenta
+// conocida sin ninguna fricción. 10/15min es holgado para un empleado real
+// que se equivoca de contraseña, pero corta cualquier automatización.
+const limitadorLogin = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en unos minutos.' },
+});
+
 // POST /api/auth/login
 // Recibe usuario y contraseña, devuelve un token si son correctos.
 // Esta es la ÚNICA ruta de la API que no exige token (no puede: es la que lo entrega).
-router.post('/login', async (req, res) => {
+router.post('/login', limitadorLogin, async (req, res) => {
   const { usuario, contrasena } = req.body;
 
   // Validación básica: ambos campos son obligatorios.

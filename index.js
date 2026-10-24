@@ -54,6 +54,14 @@ const checklistRoutes = require("./routes/checklist");
 
 const app = express();
 
+// Render sirve la API detrás de un proxy inverso: sin esto, cada petición
+// llegaría con la misma IP interna del proxy y el rate limit del login
+// (routes/auth.js) limitaría a TODOS los usuarios como si fueran uno solo,
+// o express-rate-limit directamente rechazaría la petición por ver un
+// X-Forwarded-For inesperado. `1` confía solo en el primer proxy (el de
+// Render), no en cualquier IP que el cliente diga ser.
+app.set('trust proxy', 1);
+
 // -----------------------------------------------------------------------------
 // CORS (Cross-Origin Resource Sharing)
 // -----------------------------------------------------------------------------
