@@ -32,6 +32,7 @@
 const express = require("express");
 const pool = require("../db");
 const { verificarToken, requiereRol } = require("../middleware/auth");
+const { EXPRESION_EXISTENCIA } = require("../utils/existencia");
 
 const router = express.Router();
 
@@ -57,15 +58,6 @@ router.get("/costos-extra", async (req, res) => {
 });
 
 router.use(requiereRol("administrador", "encargado"));
-
-// Expresión SQL compartida: existencia = entrada + ajuste − salida − merma.
-const EXPRESION_EXISTENCIA = `COALESCE(SUM(
-  CASE
-    WHEN m.tipo IN ('entrada', 'ajuste') THEN m.cantidad
-    WHEN m.tipo IN ('salida', 'merma') THEN -m.cantidad
-    ELSE 0
-  END
-), 0)`;
 
 // GET /api/insumos
 // Lista todos los insumos con su existencia calculada y si está en o por

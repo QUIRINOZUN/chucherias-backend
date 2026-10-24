@@ -61,6 +61,7 @@ const multer = require("multer");
 const pool = require("../db");
 const { verificarToken, requiereRol } = require("../middleware/auth");
 const { subirImagen, borrarImagen } = require("../utils/cloudinary");
+const { EXPRESION_EXISTENCIA } = require("../utils/existencia");
 
 const router = express.Router();
 
@@ -213,6 +214,33 @@ router.get("/productos", async (req, res) => {
        ORDER BY vp.precio`,
     );
 
+    // Disponibilidad por receta (2026-10-22): para cada variante con receta
+    // capturada, si TODOS sus insumos fijos (receta_insumos) tienen
+    // existencia > 0. Una variante sin receta, o con una receta sin ningún
+    // insumo todavía, no aparece en este mapa — se trata como disponible
+    // (mismo criterio ya establecido: "sin receta" es un estado válido, no
+    // bloquea nada). Solo mira los insumos FIJOS de la receta, no las
+    // elecciones opcionales (salsa/topping) del POS — revisar cada
+    // combinación posible de elección sería mucho más trabajo del que pide
+    // esta función, que es evitar vender algo que de plano no se puede
+    // armar con lo que ya trae la receta.
+    const disponibilidad = await pool.query(
+      `SELECT r.variante_id, BOOL_AND(existencias.existencia > 0) AS insumos_suficientes
+       FROM recetas r
+       JOIN receta_insumos ri ON ri.receta_id = r.id
+       JOIN (
+         SELECT i.id, ${EXPRESION_EXISTENCIA} AS existencia
+         FROM insumos i
+         LEFT JOIN movimientos_inventario m ON m.insumo_id = i.id
+         GROUP BY i.id
+       ) existencias ON existencias.id = ri.insumo_id
+       GROUP BY r.variante_id`,
+    );
+    const suficientesPorVariante = {};
+    for (const fila of disponibilidad.rows) {
+      suficientesPorVariante[fila.variante_id] = fila.insumos_suficientes;
+    }
+
     const variantesPorProducto = {};
     for (const variante of variantes.rows) {
       if (!variantesPorProducto[variante.producto_id]) {
@@ -227,6 +255,7 @@ router.get("/productos", async (req, res) => {
         // — null si nunca se ha editado desde que esto se agregó.
         editado_por_nombre: variante.editado_por_nombre,
         fecha_edicion: variante.fecha_edicion,
+        insumos_suficientes: suficientesPorVariante[variante.id] ?? true,
       });
     }
 

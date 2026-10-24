@@ -132,6 +132,7 @@ router.get("/", async (req, res) => {
     const resultado = await pool.query(
       `SELECT v.id AS variante_id, v.nombre AS variante_nombre, v.precio,
               p.id AS producto_id, p.nombre AS producto_nombre,
+              p.requiere_preparacion,
               c.nombre AS categoria,
               r.id AS receta_id, r.imagen_url, r.fecha_edicion,
               ue.nombre AS editado_por_nombre,
@@ -145,8 +146,8 @@ router.get("/", async (req, res) => {
        LEFT JOIN receta_insumos ri ON ri.receta_id = r.id
        LEFT JOIN receta_pasos rp ON rp.receta_id = r.id
        WHERE p.activo = TRUE
-       GROUP BY v.id, v.nombre, v.precio, p.id, p.nombre, c.nombre, r.id,
-                r.fecha_edicion, ue.nombre
+       GROUP BY v.id, v.nombre, v.precio, p.id, p.nombre, p.requiere_preparacion,
+                c.nombre, r.id, r.fecha_edicion, ue.nombre
        ORDER BY c.nombre, p.nombre, v.precio`,
     );
 
@@ -156,6 +157,11 @@ router.get("/", async (req, res) => {
       precio: Number(fila.precio),
       producto_id: fila.producto_id,
       producto_nombre: fila.producto_nombre,
+      // 2026-10-22: separa en Recetario los platillos que de verdad
+      // necesitan receta (se preparan en cocina) de los que no (bebidas
+      // embotelladas, botanas de bolsa) — misma bandera que ya decide si
+      // la orden pasa por el tablero de Comandas (ver catalogo.js).
+      requiere_preparacion: fila.requiere_preparacion,
       categoria: fila.categoria,
       tiene_receta: fila.receta_id !== null,
       total_insumos: Number(fila.total_insumos),
@@ -422,11 +428,9 @@ router.put("/variante/:varianteId/tutorial", async (req, res) => {
 router.post("/variante/:varianteId/imagen", (req, res) => {
   uploadImagen.single("imagen")(req, res, async (errorMulter) => {
     if (errorMulter) {
-      return res
-        .status(400)
-        .json({
-          error: errorMulter.message || "No se pudo procesar el archivo.",
-        });
+      return res.status(400).json({
+        error: errorMulter.message || "No se pudo procesar el archivo.",
+      });
     }
     if (!req.file) {
       return res
