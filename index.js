@@ -52,6 +52,7 @@ const recetasRoutes = require("./routes/recetas");
 const clientesRoutes = require("./routes/clientes");
 const reportesRoutes = require("./routes/reportes");
 const checklistRoutes = require("./routes/checklist");
+const nominaRoutes = require("./routes/nomina");
 
 const app = express();
 
@@ -130,6 +131,8 @@ app.use("/api/clientes", clientesRoutes);
 app.use("/api/reportes", reportesRoutes);
 // Checklist de apertura/cierre (pedido explícito en la entrevista).
 app.use("/api/checklist", checklistRoutes);
+// Nómina por horas trabajadas (pago del personal).
+app.use("/api/nomina", nominaRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)

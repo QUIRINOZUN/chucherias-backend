@@ -29,7 +29,8 @@ CREATE TABLE empleados (
     nombre         VARCHAR(100) NOT NULL,
     puesto         VARCHAR(50)  NOT NULL,   -- cajero, auxiliar de cocina, repartidor, encargado
     fecha_ingreso  DATE NOT NULL,
-    activo         BOOLEAN NOT NULL DEFAULT TRUE
+    activo         BOOLEAN NOT NULL DEFAULT TRUE,
+    pago_por_hora  NUMERIC(10,2)  -- tarifa por hora para nómina; NULL = sin capturar (ver 2026-10-22_empleados_pago_por_hora.sql)
 );
 
 CREATE TABLE asistencias (
