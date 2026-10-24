@@ -21,11 +21,24 @@
 // (es el ciclo de lealtad ACTUAL de cada cliente, no cuántas visitas tuvo
 // en ese rango). El resto (ventas, mermas, asistencias/retardos, clientes
 // nuevos) sí se acota al rango de fechas.
+//
+// GRÁFICAS (2026-10-22): `ventas.serie_diaria` agrega ventas completadas
+// POR DÍA del negocio, para la gráfica de tendencia de la pestaña Ventas —
+// es el único corte nuevo que de verdad necesitaba datos adicionales (una
+// tendencia necesita una serie, no un solo total). Acotada a los últimos 30
+// días que caigan dentro del rango filtrado (`LIMIT 30` antes de reordenar
+// ascendente) para que la consulta nunca crezca sin límite si no hay
+// filtro de fecha (sin filtros, el resto del reporte sigue siendo TODO el
+// histórico — esta serie es la única excepción, acotada a propósito porque
+// alimenta un dibujo, no una cifra). El resto de las gráficas de la
+// pantalla (inventario/personal/clientes) se arman en el frontend
+// reutilizando cifras que esta respuesta ya traía.
 // =============================================================================
 const express = require("express");
 const pool = require("../db");
 const { verificarToken, requiereRol } = require("../middleware/auth");
 const { diaNegocioSql, fechaValida } = require("../utils/fecha");
+const { EXPRESION_EXISTENCIA } = require("../utils/existencia");
 
 const router = express.Router();
 
@@ -48,6 +61,7 @@ router.get("/resumen", async (req, res) => {
   try {
     const [
       ventas,
+      serieDiaria,
       insumos,
       mermas,
       empleados,
@@ -73,25 +87,39 @@ router.get("/resumen", async (req, res) => {
         rango,
       ),
 
+      // ---- Serie diaria de ventas completadas, para la gráfica de
+      // tendencia (ver nota de cabecera "GRÁFICAS"). `to_char` para que el
+      // driver devuelva texto AAAA-MM-DD y no una fecha que el navegador
+      // corra un día por el offset negativo de México (mismo criterio que
+      // ya usa cortes_caja/asistencias). ----
+      pool.query(
+        `SELECT dia, ventas, monto FROM (
+           SELECT to_char(${diaNegocioSql("fecha")}, 'YYYY-MM-DD') AS dia,
+                  ${diaNegocioSql("fecha")} AS dia_orden,
+                  COUNT(*) FILTER (WHERE estado = 'completada')::int AS ventas,
+                  COALESCE(SUM(total) FILTER (WHERE estado = 'completada'), 0) AS monto
+           FROM ventas
+           WHERE ($1::date IS NULL OR ${diaNegocioSql("fecha")} >= $1::date)
+             AND ($2::date IS NULL OR ${diaNegocioSql("fecha")} <= $2::date)
+           GROUP BY dia, dia_orden
+           ORDER BY dia_orden DESC
+           LIMIT 30
+         ) recientes
+         ORDER BY dia_orden ASC`,
+        rango,
+      ),
+
       // ---- INVENTARIO (foto de AHORA, no del periodo): cuántos insumos
       // están en o por debajo de su cantidad_minima. Misma expresión de
-      // existencia que ya usa routes/insumos.js (entrada/ajuste suman,
-      // salida/merma restan) — duplicada aquí a propósito: no hay un
-      // utils/ que la exporte todavía, y moverla implicaría tocar
-      // insumos.js, fuera del alcance de este reporte de solo lectura. ----
+      // existencia que ya usa routes/insumos.js, compartida desde
+      // utils/existencia.js (2026-10-22, ver su comentario). ----
       pool.query(
         `SELECT
            COUNT(*)::int AS total_insumos,
            COUNT(*) FILTER (WHERE existencia <= cantidad_minima)::int AS bajo_minimo
          FROM (
            SELECT i.id, i.cantidad_minima,
-             COALESCE(SUM(
-               CASE
-                 WHEN m.tipo IN ('entrada', 'ajuste') THEN m.cantidad
-                 WHEN m.tipo IN ('salida', 'merma') THEN -m.cantidad
-                 ELSE 0
-               END
-             ), 0) AS existencia
+             ${EXPRESION_EXISTENCIA} AS existencia
            FROM insumos i
            LEFT JOIN movimientos_inventario m ON m.insumo_id = i.id
            GROUP BY i.id, i.cantidad_minima
@@ -174,7 +202,7 @@ router.get("/resumen", async (req, res) => {
 
     res.json({
       periodo: { desde: desde || null, hasta: hasta || null },
-      ventas: ventas.rows[0],
+      ventas: { ...ventas.rows[0], serie_diaria: serieDiaria.rows },
       inventario: {
         ...insumos.rows[0],
         ...mermas.rows[0],
