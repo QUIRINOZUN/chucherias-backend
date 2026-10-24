@@ -32,6 +32,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 const pool = require("./db");
 
 // Cada archivo de rutas exporta un Router de Express independiente.
@@ -61,6 +62,12 @@ const app = express();
 // X-Forwarded-For inesperado. `1` confía solo en el primer proxy (el de
 // Render), no en cualquier IP que el cliente diga ser.
 app.set('trust proxy', 1);
+
+// Headers HTTP de seguridad estándar (X-Content-Type-Options, X-Frame-Options,
+// etc.). Esta API solo devuelve JSON (el frontend vive aparte en Vercel, las
+// imágenes en Cloudinary), así que los valores default de helmet aplican sin
+// configuración especial.
+app.use(helmet());
 
 // -----------------------------------------------------------------------------
 // CORS (Cross-Origin Resource Sharing)
