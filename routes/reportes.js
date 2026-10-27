@@ -33,6 +33,16 @@
 // alimenta un dibujo, no una cifra). El resto de las gráficas de la
 // pantalla (inventario/personal/clientes) se arman en el frontend
 // reutilizando cifras que esta respuesta ya traía.
+//
+// RENTABILIDAD (2026-10-27): `rentabilidad.costo_ventas`/`utilidad_bruta`
+// son del PERIODO filtrado, calculados contra lo que de verdad se vendió
+// (orden_detalle de ventas completadas, líneas no canceladas) — no el costo
+// teórico del catálogo. `insumos_sin_costo`/`top_margen_bajo` son otra
+// "foto de ahora" (catálogo actual, no el periodo): cuántos insumos
+// todavía no tienen costo_unitario capturado, y qué variantes activas
+// tienen el margen % más bajo hoy. Una receta con algún insumo sin costo
+// capturado nunca suma un costo parcial — se cuenta en `lineas_sin_costo`/
+// se excluye de `top_margen_bajo` en vez de mostrar un número engañoso.
 // =============================================================================
 const express = require("express");
 const pool = require("../db");
@@ -70,6 +80,9 @@ router.get("/resumen", async (req, res) => {
       clientesTotal,
       clientesNuevos,
       topClientes,
+      costoVentas,
+      costosInsumos,
+      topMargenBajo,
     ] = await Promise.all([
       // ---- VENTAS: solo cuenta lo COMPLETADO para los montos; las
       // canceladas se cuentan aparte, nunca suman a monto_total. ----
@@ -198,6 +211,80 @@ router.get("/resumen", async (req, res) => {
          ORDER BY visitas_acumuladas DESC, nombre_completo
          LIMIT 5`,
       ),
+
+      // ---- RENTABILIDAD (2026-10-27) — costo REAL de lo que se vendió en
+      // el periodo (no el teórico del catálogo): por cada línea activa
+      // (no cancelada) de una venta completada, el costo de su receta =
+      // SUM(receta_insumos.cantidad × insumos.costo_unitario), solo si
+      // TODOS los insumos de esa receta tienen costo capturado (si falta
+      // alguno, o la variante no tiene receta, la línea se cuenta en
+      // "lineas_sin_costo" en vez de sumar un costo parcial engañoso). La
+      // misma CTE se repite en la consulta de "top_margen_bajo" de abajo
+      // (no hay un utils/ que la comparta entre las dos, mismo criterio ya
+      // documentado para EXPRESION_EXISTENCIA antes de que existiera
+      // utils/existencia.js — si la regla de costo cambia, hay que
+      // actualizar las dos). ----
+      pool.query(
+        `WITH costo_por_receta AS (
+           SELECT ri.receta_id,
+                  SUM(ri.cantidad * i.costo_unitario) AS costo_unitario_receta,
+                  BOOL_AND(i.costo_unitario IS NOT NULL) AS costo_completo
+           FROM receta_insumos ri
+           JOIN insumos i ON i.id = ri.insumo_id
+           GROUP BY ri.receta_id
+         )
+         SELECT
+           COALESCE(SUM(od.cantidad * cpr.costo_unitario_receta)
+             FILTER (WHERE cpr.costo_completo), 0) AS costo_ventas,
+           COUNT(od.id) FILTER (WHERE cpr.costo_completo)::int AS lineas_con_costo,
+           COUNT(od.id) FILTER (WHERE cpr.costo_completo IS NOT TRUE)::int AS lineas_sin_costo
+         FROM ventas v
+         JOIN orden_detalle od ON od.orden_id = v.orden_id AND od.cancelado = FALSE
+         LEFT JOIN recetas r ON r.variante_id = od.variante_id
+         LEFT JOIN costo_por_receta cpr ON cpr.receta_id = r.id
+         WHERE v.estado = 'completada'
+           AND ($1::date IS NULL OR ${diaNegocioSql("v.fecha")} >= $1::date)
+           AND ($2::date IS NULL OR ${diaNegocioSql("v.fecha")} <= $2::date)`,
+        rango,
+      ),
+
+      // Foto de AHORA (no del periodo): cuántos insumos todavía no tienen
+      // costo_unitario capturado — mide el avance de la captura, no
+      // depende de qué se vendió.
+      pool.query(
+        `SELECT COUNT(*)::int AS total_insumos,
+                COUNT(*) FILTER (WHERE costo_unitario IS NULL)::int AS insumos_sin_costo
+         FROM insumos`,
+      ),
+
+      // Top 5 productos con MENOR margen % — del CATÁLOGO actual (precio
+      // de hoy vs. costo de hoy), no de lo vendido en el periodo; otra
+      // "foto de ahora", para decidir qué platillos conviene repreciar.
+      // Solo variantes activas con receta completa (si falta el costo de
+      // algún insumo, no se puede calcular un margen real).
+      pool.query(
+        `WITH costo_por_receta AS (
+           SELECT ri.receta_id,
+                  SUM(ri.cantidad * i.costo_unitario) AS costo_unitario_receta,
+                  BOOL_AND(i.costo_unitario IS NOT NULL) AS costo_completo
+           FROM receta_insumos ri
+           JOIN insumos i ON i.id = ri.insumo_id
+           GROUP BY ri.receta_id
+         )
+         SELECT v.id AS variante_id, v.nombre AS variante_nombre,
+                p.nombre AS producto_nombre, v.precio,
+                cpr.costo_unitario_receta AS costo,
+                ROUND(
+                  ((v.precio - cpr.costo_unitario_receta) / v.precio * 100)::numeric, 1
+                ) AS margen_porcentaje
+         FROM variantes_producto v
+         JOIN productos p ON p.id = v.producto_id
+         JOIN recetas r ON r.variante_id = v.id
+         JOIN costo_por_receta cpr ON cpr.receta_id = r.id AND cpr.costo_completo
+         WHERE v.activo = TRUE AND p.activo = TRUE AND v.precio > 0
+         ORDER BY margen_porcentaje ASC
+         LIMIT 5`,
+      ),
     ]);
 
     res.json({
@@ -217,6 +304,30 @@ router.get("/resumen", async (req, res) => {
         ...clientesNuevos.rows[0],
         top_clientes: topClientes.rows,
       },
+      rentabilidad: (() => {
+        const ingresos = Number(ventas.rows[0].monto_total);
+        const costoVentasReal = Number(costoVentas.rows[0].costo_ventas);
+        const utilidadBruta = ingresos - costoVentasReal;
+        return {
+          ingresos,
+          costo_ventas: costoVentasReal,
+          utilidad_bruta: utilidadBruta,
+          margen_porcentaje:
+            ingresos > 0
+              ? Math.round((utilidadBruta / ingresos) * 1000) / 10
+              : null,
+          lineas_con_costo: costoVentas.rows[0].lineas_con_costo,
+          lineas_sin_costo: costoVentas.rows[0].lineas_sin_costo,
+          insumos_sin_costo: costosInsumos.rows[0].insumos_sin_costo,
+          total_insumos: costosInsumos.rows[0].total_insumos,
+          top_margen_bajo: topMargenBajo.rows.map((fila) => ({
+            ...fila,
+            precio: Number(fila.precio),
+            costo: Number(fila.costo),
+            margen_porcentaje: Number(fila.margen_porcentaje),
+          })),
+        };
+      })(),
     });
   } catch (error) {
     console.error(error);
