@@ -67,7 +67,7 @@ router.get("/", async (req, res) => {
     const resultado = await pool.query(
       `SELECT i.id, i.nombre, i.unidad_medida, i.cantidad_minima, i.proveedor_id,
               p.nombre AS proveedor, i.categoria_id, c.nombre AS categoria,
-              i.costo_extra,
+              i.costo_extra, i.costo_unitario,
               ${EXPRESION_EXISTENCIA} AS existencia
        FROM insumos i
        LEFT JOIN proveedores p ON p.id = i.proveedor_id
@@ -174,6 +174,7 @@ router.post("/", async (req, res) => {
     proveedor_id,
     categoria_id,
     costo_extra,
+    costo_unitario,
   } = req.body;
 
   if (!nombre?.trim() || !unidad_medida?.trim()) {
@@ -186,12 +187,17 @@ router.post("/", async (req, res) => {
       .status(400)
       .json({ error: "El costo extra no puede ser negativo." });
   }
+  if (costo_unitario != null && Number(costo_unitario) < 0) {
+    return res
+      .status(400)
+      .json({ error: "El costo unitario no puede ser negativo." });
+  }
 
   try {
     const resultado = await pool.query(
-      `INSERT INTO insumos (nombre, unidad_medida, cantidad_minima, proveedor_id, categoria_id, costo_extra)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, nombre, unidad_medida, cantidad_minima, proveedor_id, categoria_id, costo_extra`,
+      `INSERT INTO insumos (nombre, unidad_medida, cantidad_minima, proveedor_id, categoria_id, costo_extra, costo_unitario)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, nombre, unidad_medida, cantidad_minima, proveedor_id, categoria_id, costo_extra, costo_unitario`,
       [
         nombre.trim(),
         unidad_medida.trim(),
@@ -199,6 +205,7 @@ router.post("/", async (req, res) => {
         proveedor_id || null,
         categoria_id || null,
         costo_extra || null,
+        costo_unitario || null,
       ],
     );
     res.status(201).json(resultado.rows[0]);
@@ -226,12 +233,18 @@ router.patch("/:id", async (req, res) => {
     proveedor_id,
     categoria_id,
     costo_extra,
+    costo_unitario,
   } = req.body;
 
   if (costo_extra != null && Number(costo_extra) < 0) {
     return res
       .status(400)
       .json({ error: "El costo extra no puede ser negativo." });
+  }
+  if (costo_unitario != null && Number(costo_unitario) < 0) {
+    return res
+      .status(400)
+      .json({ error: "El costo unitario no puede ser negativo." });
   }
 
   try {
@@ -262,12 +275,16 @@ router.patch("/:id", async (req, res) => {
       costo_extra !== undefined
         ? costo_extra || null
         : insumoActual.costo_extra;
+    const nuevoCostoUnitario =
+      costo_unitario !== undefined
+        ? costo_unitario || null
+        : insumoActual.costo_unitario;
 
     const resultado = await pool.query(
       `UPDATE insumos SET nombre = $1, unidad_medida = $2, cantidad_minima = $3, proveedor_id = $4,
-                          categoria_id = $5, costo_extra = $6
-       WHERE id = $7
-       RETURNING id, nombre, unidad_medida, cantidad_minima, proveedor_id, categoria_id, costo_extra`,
+                          categoria_id = $5, costo_extra = $6, costo_unitario = $7
+       WHERE id = $8
+       RETURNING id, nombre, unidad_medida, cantidad_minima, proveedor_id, categoria_id, costo_extra, costo_unitario`,
       [
         nuevoNombre,
         nuevaUnidad,
@@ -275,6 +292,7 @@ router.patch("/:id", async (req, res) => {
         nuevoProveedorId,
         nuevaCategoriaId,
         nuevoCostoExtra,
+        nuevoCostoUnitario,
         id,
       ],
     );

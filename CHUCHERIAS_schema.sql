@@ -171,7 +171,11 @@ CREATE TABLE insumos (
     -- El servidor ya resuelve cada insumo "elegido" por nombre (routes/
     -- ventas.js), así que este campo nunca depende de un precio enviado por
     -- el cliente.
-    costo_extra       NUMERIC(10,2)
+    costo_extra       NUMERIC(10,2),
+    -- Costeo y rentabilidad (2026-10-27): costo de una unidad de este insumo
+    -- (en su propia unidad_medida) — NULL = todavía sin capturar, ese
+    -- insumo no entra al cálculo de costo/margen de receta.
+    costo_unitario    NUMERIC(10,2)
 );
 
 CREATE TABLE receta_insumos (
