@@ -151,29 +151,71 @@ router.get("/", async (req, res) => {
        ORDER BY c.nombre, p.nombre, v.precio`,
     );
 
-    const variantes = resultado.rows.map((fila) => ({
-      variante_id: fila.variante_id,
-      variante_nombre: fila.variante_nombre,
-      precio: Number(fila.precio),
-      producto_id: fila.producto_id,
-      producto_nombre: fila.producto_nombre,
-      // 2026-10-22: separa en Recetario los platillos que de verdad
-      // necesitan receta (se preparan en cocina) de los que no (bebidas
-      // embotelladas, botanas de bolsa) — misma bandera que ya decide si
-      // la orden pasa por el tablero de Comandas (ver catalogo.js).
-      requiere_preparacion: fila.requiere_preparacion,
-      categoria: fila.categoria,
-      tiene_receta: fila.receta_id !== null,
-      total_insumos: Number(fila.total_insumos),
-      tiene_tutorial: Number(fila.total_pasos) > 0,
-      total_pasos: Number(fila.total_pasos),
-      tiene_imagen_referencia: !!fila.imagen_url,
-      // RNF-02: quién modificó esta receta (insumos o tutorial) por última
-      // vez, y cuándo — null si nunca se ha editado desde que esto se
-      // agregó, o si la variante todavía no tiene receta capturada.
-      editado_por_nombre: fila.editado_por_nombre,
-      fecha_edicion: fila.fecha_edicion,
-    }));
+    // Costeo y rentabilidad (2026-10-27): costo real de cada receta =
+    // SUM(cantidad × costo_unitario) de sus insumos fijos. Consulta APARTE
+    // (no agregada en la de arriba) para no mezclarla con el JOIN de
+    // receta_pasos, que ya multiplica filas (por eso los COUNT(DISTINCT...)
+    // de arriba) — mismo patrón ya usado en catalogo.js para
+    // insumos_suficientes. costo_completo es false si ALGÚN insumo de esa
+    // receta todavía no tiene costo_unitario capturado — en ese caso no se
+    // muestra un costo parcial que confundiría, se trata como "sin costo"
+    // (igual criterio que "sin receta": no es un error, solo falta dato).
+    const costos = await pool.query(
+      `SELECT ri.receta_id,
+              SUM(ri.cantidad * i.costo_unitario) AS costo_receta,
+              BOOL_AND(i.costo_unitario IS NOT NULL) AS costo_completo
+       FROM receta_insumos ri
+       JOIN insumos i ON i.id = ri.insumo_id
+       GROUP BY ri.receta_id`,
+    );
+    const costoPorReceta = {};
+    for (const fila of costos.rows) {
+      costoPorReceta[fila.receta_id] = fila.costo_completo
+        ? Number(fila.costo_receta)
+        : null;
+    }
+
+    const variantes = resultado.rows.map((fila) => {
+      const costoReceta = fila.receta_id
+        ? (costoPorReceta[fila.receta_id] ?? null)
+        : null;
+      const precio = Number(fila.precio);
+      const margen = costoReceta != null ? precio - costoReceta : null;
+      const margenPorcentaje =
+        costoReceta != null && precio > 0
+          ? Math.round((margen / precio) * 1000) / 10
+          : null;
+      return {
+        variante_id: fila.variante_id,
+        variante_nombre: fila.variante_nombre,
+        precio: Number(fila.precio),
+        producto_id: fila.producto_id,
+        producto_nombre: fila.producto_nombre,
+        // 2026-10-22: separa en Recetario los platillos que de verdad
+        // necesitan receta (se preparan en cocina) de los que no (bebidas
+        // embotelladas, botanas de bolsa) — misma bandera que ya decide si
+        // la orden pasa por el tablero de Comandas (ver catalogo.js).
+        requiere_preparacion: fila.requiere_preparacion,
+        categoria: fila.categoria,
+        tiene_receta: fila.receta_id !== null,
+        total_insumos: Number(fila.total_insumos),
+        tiene_tutorial: Number(fila.total_pasos) > 0,
+        total_pasos: Number(fila.total_pasos),
+        tiene_imagen_referencia: !!fila.imagen_url,
+        // RNF-02: quién modificó esta receta (insumos o tutorial) por
+        // última vez, y cuándo — null si nunca se ha editado desde que
+        // esto se agregó, o si la variante todavía no tiene receta
+        // capturada.
+        editado_por_nombre: fila.editado_por_nombre,
+        fecha_edicion: fila.fecha_edicion,
+        // Costeo y rentabilidad (2026-10-27): null si la variante no tiene
+        // receta, o si algún insumo de su receta todavía no tiene
+        // costo_unitario capturado.
+        costo_receta: costoReceta,
+        margen: margen,
+        margen_porcentaje: margenPorcentaje,
+      };
+    });
 
     res.json(variantes);
   } catch (error) {
@@ -196,7 +238,8 @@ router.get("/variante/:varianteId", async (req, res) => {
 
     const resultado = await pool.query(
       `SELECT ri.id, ri.insumo_id, i.nombre AS insumo_nombre,
-              i.unidad_medida AS insumo_unidad_base, ri.cantidad, ri.unidad_medida
+              i.unidad_medida AS insumo_unidad_base, ri.cantidad, ri.unidad_medida,
+              i.costo_unitario
        FROM recetas r
        JOIN receta_insumos ri ON ri.receta_id = r.id
        JOIN insumos i ON i.id = ri.insumo_id
@@ -205,10 +248,20 @@ router.get("/variante/:varianteId", async (req, res) => {
       [varianteId],
     );
 
+    // Costeo (2026-10-27): costo de esta línea = cantidad × costo_unitario
+    // del insumo — null si ese insumo todavía no tiene costo capturado. El
+    // editor lo usa para mostrar un subtotal por línea y el total de la
+    // receta mientras se edita.
     res.json(
       resultado.rows.map((fila) => ({
         ...fila,
         cantidad: Number(fila.cantidad),
+        costo_unitario:
+          fila.costo_unitario != null ? Number(fila.costo_unitario) : null,
+        costo_linea:
+          fila.costo_unitario != null
+            ? Number(fila.cantidad) * Number(fila.costo_unitario)
+            : null,
       })),
     );
   } catch (error) {
@@ -313,7 +366,8 @@ router.put("/variante/:varianteId", async (req, res) => {
 
     const resultado = await pool.query(
       `SELECT ri.id, ri.insumo_id, i.nombre AS insumo_nombre,
-              i.unidad_medida AS insumo_unidad_base, ri.cantidad, ri.unidad_medida
+              i.unidad_medida AS insumo_unidad_base, ri.cantidad, ri.unidad_medida,
+              i.costo_unitario
        FROM receta_insumos ri
        JOIN insumos i ON i.id = ri.insumo_id
        WHERE ri.receta_id = $1
@@ -324,6 +378,12 @@ router.put("/variante/:varianteId", async (req, res) => {
       resultado.rows.map((fila) => ({
         ...fila,
         cantidad: Number(fila.cantidad),
+        costo_unitario:
+          fila.costo_unitario != null ? Number(fila.costo_unitario) : null,
+        costo_linea:
+          fila.costo_unitario != null
+            ? Number(fila.cantidad) * Number(fila.costo_unitario)
+            : null,
       })),
     );
   } catch (error) {
