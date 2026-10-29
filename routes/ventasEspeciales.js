@@ -24,6 +24,20 @@
 //                                              reemplazo-completo que ya
 //                                              usan routes/horarios.js y
 //                                              routes/recetas.js).
+//   DELETE /:id                             → elimina la cotización por
+//                                              completo (cabecera + sus
+//                                              productos), sin importar su
+//                                              `estado` — a diferencia de
+//                                              una venta real (routes/
+//                                              ventas.js), una cotización
+//                                              nunca tiene historial de
+//                                              caja/inventario/comandas
+//                                              dependiendo de ella (ver
+//                                              CONCEPTO CLAVE abajo), así
+//                                              que no hace falta el patrón
+//                                              de "nunca se borra, se
+//                                              corrige" que sí aplica a
+//                                              usuarios/asistencias.
 //
 // CONCEPTO CLAVE: esto NO es una venta real todavía — es una cotización con
 // fecha agendada, pensada para planear un pedido grande con anticipación
@@ -434,6 +448,47 @@ router.patch("/:id", async (req, res) => {
     }
     console.error(error);
     res.status(500).json({ error: "Error al actualizar la venta especial." });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /api/ventas-especiales/:id
+// Borra la cotización completa (sus líneas primero, por la FK sin cascada de
+// venta_especial_detalle), sin importar el estado en el que esté — es una
+// cotización, no una venta real, así que nunca queda historial de otra tabla
+// dependiendo de ella.
+router.delete("/:id", async (req, res) => {
+  const { id } = req.params;
+  if (!idValido(id)) {
+    return res.status(400).json({ error: "El id debe ser numérico." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const existente = await client.query(
+      "SELECT id FROM ventas_especiales WHERE id = $1",
+      [id],
+    );
+    if (existente.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Venta especial no encontrada." });
+    }
+
+    await client.query(
+      "DELETE FROM venta_especial_detalle WHERE venta_especial_id = $1",
+      [id],
+    );
+    await client.query("DELETE FROM ventas_especiales WHERE id = $1", [id]);
+
+    await client.query("COMMIT");
+    res.status(204).send();
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error(error);
+    res.status(500).json({ error: "Error al eliminar la venta especial." });
   } finally {
     client.release();
   }
