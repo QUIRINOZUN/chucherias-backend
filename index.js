@@ -54,6 +54,7 @@ const reportesRoutes = require("./routes/reportes");
 const checklistRoutes = require("./routes/checklist");
 const nominaRoutes = require("./routes/nomina");
 const ventasEspecialesRoutes = require("./routes/ventasEspeciales");
+const gastosRoutes = require("./routes/gastos");
 
 const app = express();
 
@@ -63,7 +64,7 @@ const app = express();
 // o express-rate-limit directamente rechazaría la petición por ver un
 // X-Forwarded-For inesperado. `1` confía solo en el primer proxy (el de
 // Render), no en cualquier IP que el cliente diga ser.
-app.set('trust proxy', 1);
+app.set("trust proxy", 1);
 
 // Headers HTTP de seguridad estándar (X-Content-Type-Options, X-Frame-Options,
 // etc.). Esta API solo devuelve JSON (el frontend vive aparte en Vercel, las
@@ -136,6 +137,8 @@ app.use("/api/checklist", checklistRoutes);
 app.use("/api/nomina", nominaRoutes);
 // Ventas especiales: agendar y cotizar desayunos, comidas y sorpresas.
 app.use("/api/ventas-especiales", ventasEspecialesRoutes);
+// Gastos generales del negocio (renta, servicios, mantenimiento, etc.).
+app.use("/api/gastos", gastosRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)

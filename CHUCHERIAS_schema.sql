@@ -463,6 +463,36 @@ CREATE TABLE checklist_marcas (
     UNIQUE (item_id, fecha)
 );
 
+-- ===================== GASTOS GENERALES (2026-10-28) =====================
+-- Renta, servicios, mantenimiento, compras no ligadas a una venta ni a un
+-- insumo de receta. Deliberadamente AISLADO de movimientos_caja/corte de
+-- caja (mismo criterio que ventas_especiales con caja/inventario/comandas):
+-- si un gasto se paga en efectivo HOY, eso se sigue registrando como
+-- "retiro" en Caja — aquí solo se anota en qué se usó el dinero. Ver la
+-- migración 2026-10-28_gastos.sql para el detalle completo de la decisión
+-- de alcance.
+
+CREATE TABLE categorias_gasto (
+    id      SERIAL PRIMARY KEY,
+    nombre  VARCHAR(60) NOT NULL UNIQUE
+);
+
+CREATE TABLE gastos (
+    id              SERIAL PRIMARY KEY,
+    categoria_id    INTEGER NOT NULL REFERENCES categorias_gasto(id),
+    concepto        VARCHAR(150) NOT NULL,
+    monto           NUMERIC(10,2) NOT NULL CHECK (monto > 0),
+    fecha           DATE NOT NULL,
+    forma_pago      VARCHAR(20) NOT NULL CHECK (forma_pago IN ('efectivo','transferencia')),
+    es_recurrente   BOOLEAN NOT NULL DEFAULT FALSE,
+    proveedor_id    INTEGER REFERENCES proveedores(id),
+    nota            VARCHAR(500),
+    registrado_por  INTEGER NOT NULL REFERENCES usuarios(id),
+    fecha_registro  TIMESTAMP NOT NULL DEFAULT NOW(),
+    editado_por     INTEGER REFERENCES usuarios(id),
+    fecha_edicion   TIMESTAMP
+);
+
 -- ===================== ÍNDICES RECOMENDADOS =====================
 
 CREATE INDEX idx_ordenes_estado ON ordenes(estado);
@@ -476,6 +506,7 @@ CREATE INDEX idx_mermas_fecha ON mermas(fecha);
 CREATE INDEX idx_orden_detalle_insumos_detalle ON orden_detalle_insumos(orden_detalle_id);
 CREATE INDEX idx_lealtad_cliente ON lealtad_historial(cliente_id);
 CREATE INDEX idx_checklist_marcas_fecha ON checklist_marcas(fecha);
+CREATE INDEX idx_gastos_fecha ON gastos(fecha);
 
 -- ===================== DATOS INICIALES (SEED) =====================
 
