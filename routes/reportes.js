@@ -43,6 +43,15 @@
 // tienen el margen % más bajo hoy. Una receta con algún insumo sin costo
 // capturado nunca suma un costo parcial — se cuenta en `lineas_sin_costo`/
 // se excluye de `top_margen_bajo` en vez de mostrar un número engañoso.
+//
+// UTILIDAD NETA (2026-10-29): cierra el círculo que dejó abierto el módulo
+// Gastos — `utilidad_neta` = utilidad_bruta − costo de mano de obra del
+// periodo (mismo cálculo que GET /api/nomina, sumado en un solo total) −
+// gastos generales del periodo (routes/gastos.js). Un turno de asistencia
+// sin cerrar o un empleado sin pago_por_hora capturado NUNCA se adivinan —
+// se excluyen de la suma y se avisan aparte (`turnos_sin_cerrar`/
+// `empleados_sin_tarifa`), mismo criterio que ya aplica costo_ventas con
+// insumos sin costo capturado.
 // =============================================================================
 const express = require("express");
 const pool = require("../db");
@@ -83,6 +92,8 @@ router.get("/resumen", async (req, res) => {
       costoVentas,
       costosInsumos,
       topMargenBajo,
+      costoManoObra,
+      gastosGenerales,
     ] = await Promise.all([
       // ---- VENTAS: solo cuenta lo COMPLETADO para los montos; las
       // canceladas se cuentan aparte, nunca suman a monto_total. ----
@@ -285,6 +296,39 @@ router.get("/resumen", async (req, res) => {
          ORDER BY margen_porcentaje ASC
          LIMIT 5`,
       ),
+
+      // ---- UTILIDAD NETA (2026-10-29): cierra el círculo que dejó abierto
+      // Gastos generales — costo de mano de obra del periodo, mismo cálculo
+      // que GET /api/nomina pero sumado en un solo total en vez de por
+      // empleado. Un turno sin cerrar NUNCA se adivina (mismo criterio que
+      // nomina.js); un empleado sin pago_por_hora capturado tampoco suma —
+      // ambos se reportan aparte para que la utilidad neta no se vea
+      // completa cuando en realidad le falta captura. ----
+      pool.query(
+        `SELECT
+           COALESCE(SUM(
+             ROUND(EXTRACT(EPOCH FROM (a.hora_salida - a.hora_entrada)) / 3600, 2) * e.pago_por_hora
+           ) FILTER (WHERE a.hora_salida IS NOT NULL AND e.pago_por_hora IS NOT NULL), 0) AS costo_mano_obra,
+           COUNT(*) FILTER (WHERE a.hora_salida IS NULL)::int AS turnos_sin_cerrar,
+           (SELECT COUNT(*)::int FROM empleados WHERE activo = TRUE AND pago_por_hora IS NULL) AS empleados_sin_tarifa
+         FROM empleados e
+         JOIN asistencias a ON a.empleado_id = e.id
+         WHERE e.activo = TRUE
+           AND ($1::date IS NULL OR a.fecha >= $1::date)
+           AND ($2::date IS NULL OR a.fecha <= $2::date)`,
+        rango,
+      ),
+
+      // Gastos generales del periodo (routes/gastos.js) — deliberadamente
+      // aparte de caja, pero sí entran aquí: son justo el gasto que faltaba
+      // para completar la utilidad neta real.
+      pool.query(
+        `SELECT COALESCE(SUM(monto), 0) AS gastos_generales
+         FROM gastos
+         WHERE ($1::date IS NULL OR fecha >= $1::date)
+           AND ($2::date IS NULL OR fecha <= $2::date)`,
+        rango,
+      ),
     ]);
 
     res.json({
@@ -308,6 +352,12 @@ router.get("/resumen", async (req, res) => {
         const ingresos = Number(ventas.rows[0].monto_total);
         const costoVentasReal = Number(costoVentas.rows[0].costo_ventas);
         const utilidadBruta = ingresos - costoVentasReal;
+        const costoManoObraReal = Number(costoManoObra.rows[0].costo_mano_obra);
+        const gastosGeneralesReal = Number(
+          gastosGenerales.rows[0].gastos_generales,
+        );
+        const utilidadNeta =
+          utilidadBruta - costoManoObraReal - gastosGeneralesReal;
         return {
           ingresos,
           costo_ventas: costoVentasReal,
@@ -326,6 +376,20 @@ router.get("/resumen", async (req, res) => {
             costo: Number(fila.costo),
             margen_porcentaje: Number(fila.margen_porcentaje),
           })),
+          // Utilidad neta (2026-10-29): cierra el círculo de Gastos
+          // generales — ingresos menos costo de insumos, mano de obra y
+          // gastos generales del periodo. Nunca se presenta como "completa"
+          // si falta captura (turnos sin cerrar, empleados sin tarifa,
+          // líneas sin costo de insumo) — el frontend avisa cuando aplica.
+          costo_mano_obra: costoManoObraReal,
+          gastos_generales: gastosGeneralesReal,
+          utilidad_neta: utilidadNeta,
+          utilidad_neta_porcentaje:
+            ingresos > 0
+              ? Math.round((utilidadNeta / ingresos) * 1000) / 10
+              : null,
+          turnos_sin_cerrar: costoManoObra.rows[0].turnos_sin_cerrar,
+          empleados_sin_tarifa: costoManoObra.rows[0].empleados_sin_tarifa,
         };
       })(),
     });
