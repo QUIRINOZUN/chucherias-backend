@@ -15,7 +15,24 @@
 //                                  como en registrar una venta. Siempre se
 //                                  debe liberar con client.release().
 // =============================================================================
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// BUG REAL ENCONTRADO Y CORREGIDO (2026-10-30): por default, `pg` interpreta
+// una columna TIMESTAMP WITHOUT TIME ZONE (OID 1114 — ventas.fecha, mermas.fecha,
+// ordenes.fecha_creacion, movimientos_caja.fecha, etc.) usando la zona horaria
+// LOCAL del proceso de Node, NO como UTC — aunque Neon de verdad guarda esos
+// dígitos en UTC (confirmado leyendo el texto crudo de la columna) y el resto
+// del backend asume justo eso (ver utils/fecha.js, diaNegocioSql/`AT TIME ZONE
+// 'UTC'`). En una máquina de desarrollo con TZ=America/Mexico_City, esto hacía
+// que CUALQUIER fecha/hora llegara al frontend adelantada 6 horas (se descubrió
+// al investigar por qué Comandas mostraba "recién llegada" aunque ya llevara
+// rato esperando — ver CLAUDE.md, "Comandas: dirección visual..."). En
+// producción (Render) esto no se había notado porque el contenedor corre en
+// UTC, donde "hora local" y "UTC" coinciden por casualidad — pero el bug
+// seguía latente para cualquier otro entorno. Se corrige de raíz forzando a
+// `pg` a parsear SIEMPRE estas columnas como UTC, sin importar en qué zona
+// horaria corra el proceso de Node.
+types.setTypeParser(1114, (texto) => new Date(`${texto}Z`));
 
 // Conexión reutilizable a PostgreSQL (Neon).
 // Se importa este mismo "pool" desde cualquier archivo de rutas,
