@@ -493,6 +493,24 @@ CREATE TABLE gastos (
     fecha_edicion   TIMESTAMP
 );
 
+-- ===================== BITÁCORA DE AUDITORÍA (2026-10-30) =====================
+-- Quién hizo qué y cuándo, SOLO para acciones de alto riesgo (los 9
+-- "Eliminar historial", inicios de sesión, eliminar usuario, cancelar
+-- venta, retiro de caja, eliminar venta especial) — ver utils/bitacora.js
+-- y migraciones/2026-10-30_bitacora.sql para el detalle de la decisión.
+-- usuario_id es nullable y SIN FK a propósito: la bitácora nunca debe
+-- perder una fila ni bloquearse porque la cuenta que hizo la acción ya no
+-- exista; usuario_nombre se congela en el momento, igual que
+-- orden_detalle.precio_unitario con las ventas.
+CREATE TABLE bitacora_acciones (
+    id              SERIAL PRIMARY KEY,
+    usuario_id      INTEGER,
+    usuario_nombre  VARCHAR(100) NOT NULL,
+    accion          VARCHAR(50) NOT NULL,
+    detalle         TEXT,
+    fecha           TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 -- ===================== ÍNDICES RECOMENDADOS =====================
 
 CREATE INDEX idx_ordenes_estado ON ordenes(estado);
@@ -507,6 +525,8 @@ CREATE INDEX idx_orden_detalle_insumos_detalle ON orden_detalle_insumos(orden_de
 CREATE INDEX idx_lealtad_cliente ON lealtad_historial(cliente_id);
 CREATE INDEX idx_checklist_marcas_fecha ON checklist_marcas(fecha);
 CREATE INDEX idx_gastos_fecha ON gastos(fecha);
+CREATE INDEX idx_bitacora_fecha ON bitacora_acciones(fecha);
+CREATE INDEX idx_bitacora_accion ON bitacora_acciones(accion);
 
 -- ===================== DATOS INICIALES (SEED) =====================
 

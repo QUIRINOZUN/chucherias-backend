@@ -51,16 +51,17 @@
 // el precio se lee de variantes_producto en el servidor y se congela en
 // venta_especial_detalle.precio_unitario.
 // =============================================================================
-const express = require("express");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
-const { fechaValida } = require("../utils/fecha");
+const express = require('express');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
+const { registrarAccion } = require('../utils/bitacora');
+const { fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
 
-const TIPOS_VALIDOS = ["desayuno", "comida", "sorpresa", "otro"];
-const ESTADOS_VALIDOS = ["cotizada", "confirmada", "entregada", "cancelada"];
-const ROLES_VENTAS_ESPECIALES = ["administrador", "encargado", "cajero"];
+const TIPOS_VALIDOS = ['desayuno', 'comida', 'sorpresa', 'otro'];
+const ESTADOS_VALIDOS = ['cotizada', 'confirmada', 'entregada', 'cancelada'];
+const ROLES_VENTAS_ESPECIALES = ['administrador', 'encargado', 'cajero'];
 
 router.use(verificarToken);
 router.use(requiereRol(...ROLES_VENTAS_ESPECIALES));
@@ -78,19 +79,19 @@ async function resolverItems(ejecutor, items) {
   if (!Array.isArray(items) || items.length === 0) {
     throw {
       status: 400,
-      mensaje: "La cotización debe incluir al menos un producto.",
+      mensaje: 'La cotización debe incluir al menos un producto.',
     };
   }
 
   const varianteIds = items.map((item) => item.variante_id);
   if (varianteIds.some((id) => !Number.isInteger(id))) {
-    throw { status: 400, mensaje: "Hay un producto inválido en la lista." };
+    throw { status: 400, mensaje: 'Hay un producto inválido en la lista.' };
   }
   for (const item of items) {
     if (!Number.isInteger(item.cantidad) || item.cantidad <= 0) {
       throw {
         status: 400,
-        mensaje: "Cada producto necesita una cantidad válida (mayor a cero).",
+        mensaje: 'Cada producto necesita una cantidad válida (mayor a cero).',
       };
     }
   }
@@ -118,10 +119,7 @@ async function resolverItems(ejecutor, items) {
     precio_unitario: precioPorVariante[item.variante_id],
     notas: item.notas?.trim() || null,
   }));
-  const subtotal = itemsResueltos.reduce(
-    (suma, item) => suma + item.precio_unitario * item.cantidad,
-    0,
-  );
+  const subtotal = itemsResueltos.reduce((suma, item) => suma + item.precio_unitario * item.cantidad, 0);
   return { itemsResueltos, subtotal };
 }
 
@@ -157,20 +155,16 @@ async function obtenerVentaEspecialCompleta(ejecutor, id) {
 }
 
 // GET /api/ventas-especiales?desde=&hasta=&estado=&buscar=
-router.get("/", async (req, res) => {
+router.get('/', async (req, res) => {
   const { desde, hasta, estado, buscar } = req.query;
 
   if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
-    return res
-      .status(400)
-      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
   }
   if (estado && !ESTADOS_VALIDOS.includes(estado)) {
-    return res
-      .status(400)
-      .json({
-        error: `El estado debe ser uno de: ${ESTADOS_VALIDOS.join(", ")}.`,
-      });
+    return res.status(400).json({
+      error: `El estado debe ser uno de: ${ESTADOS_VALIDOS.join(', ')}.`,
+    });
   }
 
   try {
@@ -196,26 +190,26 @@ router.get("/", async (req, res) => {
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener las ventas especiales." });
+    res.status(500).json({ error: 'Error al obtener las ventas especiales.' });
   }
 });
 
 // GET /api/ventas-especiales/:id
-router.get("/:id", async (req, res) => {
+router.get('/:id', async (req, res) => {
   const { id } = req.params;
   if (!idValido(id)) {
-    return res.status(400).json({ error: "El id debe ser numérico." });
+    return res.status(400).json({ error: 'El id debe ser numérico.' });
   }
 
   try {
     const fila = await obtenerVentaEspecialCompleta(pool, id);
     if (!fila) {
-      return res.status(404).json({ error: "Venta especial no encontrada." });
+      return res.status(404).json({ error: 'Venta especial no encontrada.' });
     }
     res.json(fila);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener la venta especial." });
+    res.status(500).json({ error: 'Error al obtener la venta especial.' });
   }
 });
 
@@ -224,37 +218,23 @@ router.get("/:id", async (req, res) => {
 //   { cliente_nombre, cliente_telefono?, cliente_direccion?, tipo?,
 //     fecha_evento, hora_evento?, notas?,
 //     items: [{ variante_id, cantidad, notas? }] }
-router.post("/", async (req, res) => {
-  const {
-    cliente_nombre,
-    cliente_telefono,
-    cliente_direccion,
-    fecha_evento,
-    hora_evento,
-    notas,
-    items,
-  } = req.body;
-  const tipo = req.body.tipo || "otro";
+router.post('/', async (req, res) => {
+  const { cliente_nombre, cliente_telefono, cliente_direccion, fecha_evento, hora_evento, notas, items } = req.body;
+  const tipo = req.body.tipo || 'otro';
 
   if (!cliente_nombre?.trim()) {
-    return res
-      .status(400)
-      .json({ error: "El nombre del cliente es obligatorio." });
+    return res.status(400).json({ error: 'El nombre del cliente es obligatorio.' });
   }
   if (!fecha_evento || !fechaValida(fecha_evento)) {
-    return res
-      .status(400)
-      .json({ error: "La fecha del evento debe tener el formato AAAA-MM-DD." });
+    return res.status(400).json({ error: 'La fecha del evento debe tener el formato AAAA-MM-DD.' });
   }
   if (!TIPOS_VALIDOS.includes(tipo)) {
-    return res
-      .status(400)
-      .json({ error: `El tipo debe ser uno de: ${TIPOS_VALIDOS.join(", ")}.` });
+    return res.status(400).json({ error: `El tipo debe ser uno de: ${TIPOS_VALIDOS.join(', ')}.` });
   }
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
     const { itemsResueltos, subtotal } = await resolverItems(client, items);
 
@@ -282,27 +262,19 @@ router.post("/", async (req, res) => {
       await client.query(
         `INSERT INTO venta_especial_detalle (venta_especial_id, variante_id, cantidad, precio_unitario, notas)
          VALUES ($1, $2, $3, $4, $5)`,
-        [
-          ventaEspecialId,
-          item.variante_id,
-          item.cantidad,
-          item.precio_unitario,
-          item.notas,
-        ],
+        [ventaEspecialId, item.variante_id, item.cantidad, item.precio_unitario, item.notas],
       );
     }
 
-    await client.query("COMMIT");
-    res
-      .status(201)
-      .json(await obtenerVentaEspecialCompleta(client, ventaEspecialId));
+    await client.query('COMMIT');
+    res.status(201).json(await obtenerVentaEspecialCompleta(client, ventaEspecialId));
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query('ROLLBACK');
     if (error.status) {
       return res.status(error.status).json({ error: error.mensaje });
     }
     console.error(error);
-    res.status(500).json({ error: "Error al crear la venta especial." });
+    res.status(500).json({ error: 'Error al crear la venta especial.' });
   } finally {
     client.release();
   }
@@ -313,56 +285,51 @@ router.post("/", async (req, res) => {
 // actual. Si llega `items`, reemplaza TODOS los productos cotizados de una
 // vez (mismo criterio que PUT /api/horarios/empleado/:id) y recalcula el
 // subtotal — nunca se mezcla un item nuevo con los viejos a medias.
-router.patch("/:id", async (req, res) => {
+router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   if (!idValido(id)) {
-    return res.status(400).json({ error: "El id debe ser numérico." });
+    return res.status(400).json({ error: 'El id debe ser numérico.' });
   }
   const body = req.body;
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    const actual = await client.query(
-      "SELECT * FROM ventas_especiales WHERE id = $1",
-      [id],
-    );
+    const actual = await client.query('SELECT * FROM ventas_especiales WHERE id = $1', [id]);
     if (actual.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Venta especial no encontrada." });
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Venta especial no encontrada.' });
     }
     const actualFila = actual.rows[0];
     // fecha_evento llega de un SELECT * crudo (no de to_char()): es un Date
     // en UTC medianoche. Se convierte a texto AAAA-MM-DD ANTES de usarlo de
     // vuelta en el UPDATE, para no arriesgar que el driver la corra un día
     // (mismo bug ya corregido antes en PATCH /api/asistencias/:id).
-    const fechaEventoActualTexto = actualFila.fecha_evento
-      .toISOString()
-      .slice(0, 10);
+    const fechaEventoActualTexto = actualFila.fecha_evento.toISOString().slice(0, 10);
 
     if (body.cliente_nombre !== undefined && !body.cliente_nombre.trim()) {
       throw {
         status: 400,
-        mensaje: "El nombre del cliente no puede quedar vacío.",
+        mensaje: 'El nombre del cliente no puede quedar vacío.',
       };
     }
     if (body.tipo !== undefined && !TIPOS_VALIDOS.includes(body.tipo)) {
       throw {
         status: 400,
-        mensaje: `El tipo debe ser uno de: ${TIPOS_VALIDOS.join(", ")}.`,
+        mensaje: `El tipo debe ser uno de: ${TIPOS_VALIDOS.join(', ')}.`,
       };
     }
     if (body.estado !== undefined && !ESTADOS_VALIDOS.includes(body.estado)) {
       throw {
         status: 400,
-        mensaje: `El estado debe ser uno de: ${ESTADOS_VALIDOS.join(", ")}.`,
+        mensaje: `El estado debe ser uno de: ${ESTADOS_VALIDOS.join(', ')}.`,
       };
     }
     if (body.fecha_evento !== undefined && !fechaValida(body.fecha_evento)) {
       throw {
         status: 400,
-        mensaje: "La fecha del evento debe tener el formato AAAA-MM-DD.",
+        mensaje: 'La fecha del evento debe tener el formato AAAA-MM-DD.',
       };
     }
 
@@ -374,30 +341,16 @@ router.patch("/:id", async (req, res) => {
       nuevoSubtotal = resuelto.subtotal;
     }
 
-    const nombre =
-      body.cliente_nombre !== undefined
-        ? body.cliente_nombre.trim()
-        : actualFila.cliente_nombre;
+    const nombre = body.cliente_nombre !== undefined ? body.cliente_nombre.trim() : actualFila.cliente_nombre;
     const telefono =
-      body.cliente_telefono !== undefined
-        ? body.cliente_telefono?.trim() || null
-        : actualFila.cliente_telefono;
+      body.cliente_telefono !== undefined ? body.cliente_telefono?.trim() || null : actualFila.cliente_telefono;
     const direccion =
-      body.cliente_direccion !== undefined
-        ? body.cliente_direccion?.trim() || null
-        : actualFila.cliente_direccion;
+      body.cliente_direccion !== undefined ? body.cliente_direccion?.trim() || null : actualFila.cliente_direccion;
     const tipo = body.tipo !== undefined ? body.tipo : actualFila.tipo;
-    const fechaEvento =
-      body.fecha_evento !== undefined
-        ? body.fecha_evento
-        : fechaEventoActualTexto;
-    const horaEvento =
-      body.hora_evento !== undefined
-        ? body.hora_evento || null
-        : actualFila.hora_evento;
+    const fechaEvento = body.fecha_evento !== undefined ? body.fecha_evento : fechaEventoActualTexto;
+    const horaEvento = body.hora_evento !== undefined ? body.hora_evento || null : actualFila.hora_evento;
     const estado = body.estado !== undefined ? body.estado : actualFila.estado;
-    const notas =
-      body.notas !== undefined ? body.notas?.trim() || null : actualFila.notas;
+    const notas = body.notas !== undefined ? body.notas?.trim() || null : actualFila.notas;
 
     await client.query(
       `UPDATE ventas_especiales
@@ -405,49 +358,29 @@ router.patch("/:id", async (req, res) => {
            fecha_evento = $5, hora_evento = $6, estado = $7, notas = $8, subtotal = $9,
            fecha_actualizacion = NOW()
        WHERE id = $10`,
-      [
-        nombre,
-        telefono,
-        direccion,
-        tipo,
-        fechaEvento,
-        horaEvento,
-        estado,
-        notas,
-        nuevoSubtotal,
-        id,
-      ],
+      [nombre, telefono, direccion, tipo, fechaEvento, horaEvento, estado, notas, nuevoSubtotal, id],
     );
 
     if (itemsResueltos) {
-      await client.query(
-        "DELETE FROM venta_especial_detalle WHERE venta_especial_id = $1",
-        [id],
-      );
+      await client.query('DELETE FROM venta_especial_detalle WHERE venta_especial_id = $1', [id]);
       for (const item of itemsResueltos) {
         await client.query(
           `INSERT INTO venta_especial_detalle (venta_especial_id, variante_id, cantidad, precio_unitario, notas)
            VALUES ($1, $2, $3, $4, $5)`,
-          [
-            id,
-            item.variante_id,
-            item.cantidad,
-            item.precio_unitario,
-            item.notas,
-          ],
+          [id, item.variante_id, item.cantidad, item.precio_unitario, item.notas],
         );
       }
     }
 
-    await client.query("COMMIT");
+    await client.query('COMMIT');
     res.json(await obtenerVentaEspecialCompleta(client, id));
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query('ROLLBACK');
     if (error.status) {
       return res.status(error.status).json({ error: error.mensaje });
     }
     console.error(error);
-    res.status(500).json({ error: "Error al actualizar la venta especial." });
+    res.status(500).json({ error: 'Error al actualizar la venta especial.' });
   } finally {
     client.release();
   }
@@ -459,96 +392,92 @@ router.patch("/:id", async (req, res) => {
 // irreversible. Solo administrador (el resto del archivo es admin/
 // encargado/cajero). Registrada ANTES de DELETE /:id para que Express no
 // intente leer "historial" como un id.
-router.delete(
-  "/historial",
-  requiereRol("administrador"),
-  async (req, res) => {
-    const { desde, hasta } = req.query;
+router.delete('/historial', requiereRol('administrador'), async (req, res) => {
+  const { desde, hasta } = req.query;
 
-    if (!desde || !hasta) {
-      return res
-        .status(400)
-        .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
-    }
-    if (!fechaValida(desde) || !fechaValida(hasta)) {
-      return res
-        .status(400)
-        .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
-    }
-    if (hasta < desde) {
-      return res
-        .status(400)
-        .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
-    }
+  if (!desde || !hasta) {
+    return res.status(400).json({ error: 'Debes indicar un rango de fechas (desde y hasta).' });
+  }
+  if (!fechaValida(desde) || !fechaValida(hasta)) {
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
+  }
+  if (hasta < desde) {
+    return res.status(400).json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+  }
 
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const filas = await client.query(
-        "SELECT id FROM ventas_especiales WHERE fecha_evento >= $1::date AND fecha_evento <= $2::date",
-        [desde, hasta],
-      );
-      const ids = filas.rows.map((f) => f.id);
-      if (ids.length > 0) {
-        await client.query(
-          "DELETE FROM venta_especial_detalle WHERE venta_especial_id = ANY($1::int[])",
-          [ids],
-        );
-        await client.query(
-          "DELETE FROM ventas_especiales WHERE id = ANY($1::int[])",
-          [ids],
-        );
-      }
-      await client.query("COMMIT");
-      res.json({ eliminados: ids.length });
-    } catch (error) {
-      await client.query("ROLLBACK");
-      console.error(error);
-      res.status(500).json({
-        error: "Error al eliminar el historial de ventas especiales.",
-      });
-    } finally {
-      client.release();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const filas = await client.query(
+      'SELECT id FROM ventas_especiales WHERE fecha_evento >= $1::date AND fecha_evento <= $2::date',
+      [desde, hasta],
+    );
+    const ids = filas.rows.map((f) => f.id);
+    if (ids.length > 0) {
+      await client.query('DELETE FROM venta_especial_detalle WHERE venta_especial_id = ANY($1::int[])', [ids]);
+      await client.query('DELETE FROM ventas_especiales WHERE id = ANY($1::int[])', [ids]);
     }
-  },
-);
+    await client.query('COMMIT');
+
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_historial',
+      detalle: `Ventas especiales: ${ids.length} cotización(es) del ${desde} al ${hasta}.`,
+    });
+
+    res.json({ eliminados: ids.length });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(error);
+    res.status(500).json({
+      error: 'Error al eliminar el historial de ventas especiales.',
+    });
+  } finally {
+    client.release();
+  }
+});
 
 // DELETE /api/ventas-especiales/:id
 // Borra la cotización completa (sus líneas primero, por la FK sin cascada de
 // venta_especial_detalle), sin importar el estado en el que esté — es una
 // cotización, no una venta real, así que nunca queda historial de otra tabla
 // dependiendo de ella.
-router.delete("/:id", async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   if (!idValido(id)) {
-    return res.status(400).json({ error: "El id debe ser numérico." });
+    return res.status(400).json({ error: 'El id debe ser numérico.' });
   }
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    const existente = await client.query(
-      "SELECT id FROM ventas_especiales WHERE id = $1",
-      [id],
-    );
+    const existente = await client.query('SELECT id, cliente_nombre, estado FROM ventas_especiales WHERE id = $1', [
+      id,
+    ]);
     if (existente.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Venta especial no encontrada." });
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Venta especial no encontrada.' });
     }
 
-    await client.query(
-      "DELETE FROM venta_especial_detalle WHERE venta_especial_id = $1",
-      [id],
-    );
-    await client.query("DELETE FROM ventas_especiales WHERE id = $1", [id]);
+    await client.query('DELETE FROM venta_especial_detalle WHERE venta_especial_id = $1', [id]);
+    await client.query('DELETE FROM ventas_especiales WHERE id = $1', [id]);
 
-    await client.query("COMMIT");
+    await client.query('COMMIT');
+
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_venta_especial',
+      detalle: `Cotización de ${existente.rows[0].cliente_nombre} (estado: ${existente.rows[0].estado}).`,
+    });
+
     res.status(204).send();
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query('ROLLBACK');
     console.error(error);
-    res.status(500).json({ error: "Error al eliminar la venta especial." });
+    res.status(500).json({ error: 'Error al eliminar la venta especial.' });
   } finally {
     client.release();
   }

@@ -32,6 +32,7 @@ const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const pool = require('../db');
 const { verificarToken } = require('../middleware/auth');
+const { registrarAccion } = require('../utils/bitacora');
 
 const router = express.Router();
 
@@ -45,7 +46,9 @@ const limitadorLogin = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en unos minutos.' },
+  message: {
+    error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en unos minutos.',
+  },
 });
 
 // POST /api/auth/login
@@ -66,7 +69,7 @@ router.post('/login', limitadorLogin, async (req, res) => {
        FROM usuarios u
        JOIN roles r ON r.id = u.rol_id
        WHERE u.usuario = $1`,
-      [usuario]
+      [usuario],
     );
 
     // Usuario inexistente: mismo mensaje que contraseña incorrecta (ver arriba).
@@ -99,7 +102,18 @@ router.post('/login', limitadorLogin, async (req, res) => {
 
     // El token vence a las 8 horas (más que una jornada completa del negocio).
     // El frontend además cierra la sesión por inactividad (RNF-01).
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '8h' });
+    const token = jwt.sign(payload, process.env.JWT_SECRET, {
+      expiresIn: '8h',
+    });
+
+    // Bitácora (2026-10-30): quién inició sesión y cuándo — mejor esfuerzo,
+    // nunca bloquea ni arriesga el login si falla (ver utils/bitacora.js).
+    registrarAccion({
+      usuarioId: usuarioEncontrado.id,
+      usuarioNombre: usuarioEncontrado.nombre,
+      accion: 'inicio_sesion',
+      detalle: `Rol: ${usuarioEncontrado.rol}`,
+    });
 
     res.json({ token, usuario: payload });
   } catch (error) {

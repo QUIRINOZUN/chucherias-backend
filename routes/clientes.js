@@ -21,10 +21,11 @@
 //                                (administrador/encargado)
 //   PATCH  /:id               → editar nombre/teléfono (administrador/encargado)
 // =============================================================================
-const express = require("express");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
-const { fechaValida, diaNegocioSql } = require("../utils/fecha");
+const express = require('express');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
+const { registrarAccion } = require('../utils/bitacora');
+const { fechaValida, diaNegocioSql } = require('../utils/fecha');
 
 const router = express.Router();
 
@@ -32,14 +33,14 @@ router.use(verificarToken);
 
 // Roles que pueden buscar/crear un cliente desde el punto de venta — mismos
 // roles que ya registran ventas (routes/ventas.js).
-const ROLES_POS = ["administrador", "encargado", "cajero"];
+const ROLES_POS = ['administrador', 'encargado', 'cajero'];
 
 // GET /api/clientes/buscar?q=texto
 // Typeahead del cobro: busca por nombre o teléfono (coincidencia parcial,
 // sin importar mayúsculas/acentos exactos). Se registró ANTES de /:id para
 // que Express no confunda "buscar" con un id.
-router.get("/buscar", requiereRol(...ROLES_POS), async (req, res) => {
-  const q = (req.query.q || "").trim();
+router.get('/buscar', requiereRol(...ROLES_POS), async (req, res) => {
+  const q = (req.query.q || '').trim();
   if (q.length < 2) {
     return res.json([]);
   }
@@ -55,7 +56,7 @@ router.get("/buscar", requiereRol(...ROLES_POS), async (req, res) => {
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al buscar clientes." });
+    res.status(500).json({ error: 'Error al buscar clientes.' });
   }
 });
 
@@ -63,14 +64,12 @@ router.get("/buscar", requiereRol(...ROLES_POS), async (req, res) => {
 // Alta rápida desde el cobro (RF-21): solo nombre es obligatorio, el
 // teléfono es opcional pero recomendado (es lo que permite reconocer al
 // mismo cliente la próxima vez). Nace con 0 visitas acumuladas.
-router.post("/", requiereRol(...ROLES_POS), async (req, res) => {
-  const nombreCompleto = (req.body.nombre_completo || "").trim();
-  const telefono = (req.body.telefono || "").trim() || null;
+router.post('/', requiereRol(...ROLES_POS), async (req, res) => {
+  const nombreCompleto = (req.body.nombre_completo || '').trim();
+  const telefono = (req.body.telefono || '').trim() || null;
 
   if (!nombreCompleto) {
-    return res
-      .status(400)
-      .json({ error: "El nombre del cliente es obligatorio." });
+    return res.status(400).json({ error: 'El nombre del cliente es obligatorio.' });
   }
 
   try {
@@ -83,20 +82,20 @@ router.post("/", requiereRol(...ROLES_POS), async (req, res) => {
     res.status(201).json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al crear el cliente." });
+    res.status(500).json({ error: 'Error al crear el cliente.' });
   }
 });
 
 // A partir de aquí, solo gestión (administrador/encargado) — mismo criterio
 // que insumos.js/recetas.js: listar todo y ver el detalle es información de
 // gestión, no una acción de mostrador.
-router.use(requiereRol("administrador", "encargado"));
+router.use(requiereRol('administrador', 'encargado'));
 
 // GET /api/clientes?buscar=texto
 // Listado completo para la pantalla de gestión, con un filtro de texto
 // opcional (independiente del /buscar de arriba, que es solo para el POS).
-router.get("/", async (req, res) => {
-  const buscar = (req.query.buscar || "").trim();
+router.get('/', async (req, res) => {
+  const buscar = (req.query.buscar || '').trim();
   try {
     const resultado = await pool.query(
       buscar
@@ -112,7 +111,7 @@ router.get("/", async (req, res) => {
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener los clientes." });
+    res.status(500).json({ error: 'Error al obtener los clientes.' });
   }
 });
 
@@ -120,7 +119,7 @@ router.get("/", async (req, res) => {
 // Detalle de un cliente + su historial de lealtad completo (visitas y
 // descuentos aplicados, más recientes primero), para poder explicarle a un
 // cliente real por qué tiene o no un descuento.
-router.get("/:id", async (req, res) => {
+router.get('/:id', async (req, res) => {
   const { id } = req.params;
   try {
     const cliente = await pool.query(
@@ -129,7 +128,7 @@ router.get("/:id", async (req, res) => {
       [id],
     );
     if (cliente.rows.length === 0) {
-      return res.status(404).json({ error: "El cliente no existe." });
+      return res.status(404).json({ error: 'El cliente no existe.' });
     }
 
     const historial = await pool.query(
@@ -198,22 +197,20 @@ router.get("/:id", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener el cliente." });
+    res.status(500).json({ error: 'Error al obtener el cliente.' });
   }
 });
 
 // PATCH /api/clientes/:id
 // Corrige nombre/teléfono (ej. se capturó mal, o el cliente cambió de
 // número) — nunca toca visitas_acumuladas, eso solo lo ajusta ventas.js.
-router.patch("/:id", async (req, res) => {
+router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const nombreCompleto = (req.body.nombre_completo || "").trim();
-  const telefono = (req.body.telefono || "").trim() || null;
+  const nombreCompleto = (req.body.nombre_completo || '').trim();
+  const telefono = (req.body.telefono || '').trim() || null;
 
   if (!nombreCompleto) {
-    return res
-      .status(400)
-      .json({ error: "El nombre del cliente es obligatorio." });
+    return res.status(400).json({ error: 'El nombre del cliente es obligatorio.' });
   }
 
   try {
@@ -224,12 +221,12 @@ router.patch("/:id", async (req, res) => {
       [nombreCompleto, telefono, id],
     );
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "El cliente no existe." });
+      return res.status(404).json({ error: 'El cliente no existe.' });
     }
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al editar el cliente." });
+    res.status(500).json({ error: 'Error al editar el cliente.' });
   }
 });
 
@@ -238,43 +235,39 @@ router.patch("/:id", async (req, res) => {
 // [desde, hasta] (ambos obligatorios) — irreversible. Solo administrador.
 // OJO: no toca clientes.visitas_acumuladas — solo borra el REGISTRO de lo
 // que pasó, el contador de ciclo de cada cliente se queda como está.
-router.delete(
-  "/historial",
-  requiereRol("administrador"),
-  async (req, res) => {
-    const { desde, hasta } = req.query;
+router.delete('/historial', requiereRol('administrador'), async (req, res) => {
+  const { desde, hasta } = req.query;
 
-    if (!desde || !hasta) {
-      return res
-        .status(400)
-        .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
-    }
-    if (!fechaValida(desde) || !fechaValida(hasta)) {
-      return res
-        .status(400)
-        .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
-    }
-    if (hasta < desde) {
-      return res
-        .status(400)
-        .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
-    }
+  if (!desde || !hasta) {
+    return res.status(400).json({ error: 'Debes indicar un rango de fechas (desde y hasta).' });
+  }
+  if (!fechaValida(desde) || !fechaValida(hasta)) {
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
+  }
+  if (hasta < desde) {
+    return res.status(400).json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+  }
 
-    try {
-      const resultado = await pool.query(
-        `DELETE FROM lealtad_historial
-         WHERE ${diaNegocioSql("fecha")} >= $1::date AND ${diaNegocioSql("fecha")} <= $2::date
+  try {
+    const resultado = await pool.query(
+      `DELETE FROM lealtad_historial
+         WHERE ${diaNegocioSql('fecha')} >= $1::date AND ${diaNegocioSql('fecha')} <= $2::date
          RETURNING id`,
-        [desde, hasta],
-      );
-      res.json({ eliminados: resultado.rows.length });
-    } catch (error) {
-      console.error(error);
-      res
-        .status(500)
-        .json({ error: "Error al eliminar el historial de lealtad." });
-    }
-  },
-);
+      [desde, hasta],
+    );
+
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_historial',
+      detalle: `Lealtad: ${resultado.rows.length} evento(s) del ${desde} al ${hasta}.`,
+    });
+
+    res.json({ eliminados: resultado.rows.length });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al eliminar el historial de lealtad.' });
+  }
+});
 
 module.exports = router;

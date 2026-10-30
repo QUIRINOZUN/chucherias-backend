@@ -57,6 +57,7 @@
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
+const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
@@ -76,7 +77,7 @@ async function totalesDelDia(fecha) {
      FROM ventas
      WHERE estado = 'completada' AND ${diaNegocioSql('fecha')} = $1
      GROUP BY metodo_pago`,
-    [fecha]
+    [fecha],
   );
 
   const totales = { efectivo: 0, transferencia: 0 };
@@ -96,7 +97,7 @@ async function movimientosCajaDelDia(fecha) {
      FROM movimientos_caja
      WHERE ${diaNegocioSql('fecha')} = $1
      GROUP BY tipo`,
-    [fecha]
+    [fecha],
   );
 
   const totales = { apertura: 0, ingreso: 0, retiro: 0, reembolso: 0 };
@@ -166,7 +167,9 @@ router.post('/corte', requiereRol('administrador', 'encargado', 'cajero'), async
   // Ambos montos contados son obligatorios (0 es válido: por eso se compara
   // con null y no con "falsy").
   if (total_efectivo_contado == null || total_transferencia_contado == null) {
-    return res.status(400).json({ error: 'Debes indicar el efectivo y la transferencia contados.' });
+    return res.status(400).json({
+      error: 'Debes indicar el efectivo y la transferencia contados.',
+    });
   }
 
   const fechaCorte = fecha || fechaHoyNegocio();
@@ -190,7 +193,15 @@ router.post('/corte', requiereRol('administrador', 'encargado', 'cajero'), async
       `INSERT INTO cortes_caja (fecha, turno, total_efectivo, total_transferencia, total_sistema, diferencia, responsable_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [fechaCorte, turno || null, total_efectivo_contado, total_transferencia_contado, totalSistema, diferencia, req.usuario.id]
+      [
+        fechaCorte,
+        turno || null,
+        total_efectivo_contado,
+        total_transferencia_contado,
+        totalSistema,
+        diferencia,
+        req.usuario.id,
+      ],
     );
 
     res.status(201).json(resultado.rows[0]);
@@ -231,7 +242,7 @@ router.get('/cortes', requiereRol('administrador', 'encargado'), async (req, res
          AND ($2::date IS NULL OR cc.fecha <= $2::date)
          AND ($3::int IS NULL OR cc.responsable_id = $3::int)
        ORDER BY cc.fecha DESC, cc.id DESC`,
-      [desde || null, hasta || null, responsable_id || null]
+      [desde || null, hasta || null, responsable_id || null],
     );
     res.json(resultado.rows);
   } catch (error) {
@@ -253,7 +264,9 @@ router.post('/movimientos', requiereRol(...ROLES_CAJA), async (req, res) => {
     return res.status(400).json({ error: 'El tipo de movimiento no es válido.' });
   }
   if (tipo === 'retiro' && req.usuario.rol !== 'administrador') {
-    return res.status(403).json({ error: 'Solo el administrador puede registrar retiros de efectivo.' });
+    return res.status(403).json({
+      error: 'Solo el administrador puede registrar retiros de efectivo.',
+    });
   }
 
   const montoNum = Number(monto);
@@ -299,8 +312,18 @@ router.post('/movimientos', requiereRol(...ROLES_CAJA), async (req, res) => {
         confirmado,
         confirmado ? req.usuario.id : null,
         confirmado ? new Date() : null,
-      ]
+      ],
     );
+
+    if (tipo === 'retiro') {
+      registrarAccion({
+        usuarioId: req.usuario.id,
+        usuarioNombre: req.usuario.nombre,
+        accion: 'retiro_caja',
+        detalle: `$${montoNum.toFixed(2)} — ${motivo.trim()}`,
+      });
+    }
+
     res.status(201).json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
@@ -327,7 +350,7 @@ router.get('/movimientos', requiereRol('administrador', 'encargado'), async (req
        LEFT JOIN usuarios uc ON uc.id = mc.confirmado_por
        WHERE ${diaNegocioSql('mc.fecha')} = $1
        ORDER BY mc.fecha DESC`,
-      [fecha]
+      [fecha],
     );
     res.json(resultado.rows);
   } catch (error) {
@@ -349,7 +372,7 @@ router.get('/retiros-pendientes', requiereRol(...ROLES_CAJA), async (req, res) =
        JOIN usuarios u ON u.id = mc.responsable_id
        WHERE mc.tipo = 'retiro' AND mc.confirmado = FALSE AND ${diaNegocioSql('mc.fecha')} = $1
        ORDER BY mc.fecha ASC`,
-      [fecha]
+      [fecha],
     );
     res.json(resultado.rows);
   } catch (error) {
@@ -373,7 +396,7 @@ router.patch('/movimientos/:id/confirmar', requiereRol(...ROLES_CAJA), async (re
        SET confirmado = TRUE, confirmado_por = $1, fecha_confirmacion = NOW()
        WHERE id = $2 AND tipo = 'retiro' AND confirmado = FALSE
        RETURNING id`,
-      [req.usuario.id, id]
+      [req.usuario.id, id],
     );
 
     if (actualizado.rows.length === 0) {
@@ -389,7 +412,7 @@ router.patch('/movimientos/:id/confirmar', requiereRol(...ROLES_CAJA), async (re
        JOIN usuarios u ON u.id = mc.responsable_id
        LEFT JOIN usuarios uc ON uc.id = mc.confirmado_por
        WHERE mc.id = $1`,
-      [id]
+      [id],
     );
     res.json(completo.rows[0]);
   } catch (error) {
@@ -422,7 +445,7 @@ router.get('/retiros', requiereRol(...ROLES_CAJA), async (req, res) => {
        LEFT JOIN usuarios uc ON uc.id = mc.confirmado_por
        WHERE mc.tipo = 'retiro' AND ${diaNegocioSql('mc.fecha')} = $1
        ORDER BY mc.fecha ASC`,
-      [fecha]
+      [fecha],
     );
     const total = resultado.rows.reduce((suma, fila) => suma + Number(fila.monto), 0);
     res.json({ fecha, total, retiros: resultado.rows });
@@ -454,15 +477,27 @@ router.delete('/historial', requiereRol('administrador'), async (req, res) => {
   try {
     const cortes = await pool.query(
       `DELETE FROM cortes_caja WHERE fecha >= $1::date AND fecha <= $2::date RETURNING id`,
-      [desde, hasta]
+      [desde, hasta],
     );
     const movimientos = await pool.query(
       `DELETE FROM movimientos_caja
        WHERE ${diaNegocioSql('fecha')} >= $1::date AND ${diaNegocioSql('fecha')} <= $2::date
        RETURNING id`,
-      [desde, hasta]
+      [desde, hasta],
     );
-    res.json({ eliminados: { cortes: cortes.rows.length, movimientos: movimientos.rows.length } });
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_historial',
+      detalle: `Caja: ${cortes.rows.length} corte(s) y ${movimientos.rows.length} movimiento(s) del ${desde} al ${hasta}.`,
+    });
+
+    res.json({
+      eliminados: {
+        cortes: cortes.rows.length,
+        movimientos: movimientos.rows.length,
+      },
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al eliminar el historial de caja.' });

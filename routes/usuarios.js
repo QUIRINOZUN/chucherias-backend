@@ -49,6 +49,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
+const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio } = require('../utils/fecha');
 
 // Puesto por default al auto-crear el empleado de una cuenta nueva — el
@@ -88,7 +89,7 @@ router.get('/', requiereRol('administrador', 'encargado'), async (req, res) => {
       `SELECT u.id, u.nombre, u.usuario, u.activo, u.fecha_creacion, r.nombre AS rol
        FROM usuarios u
        JOIN roles r ON r.id = u.rol_id
-       ORDER BY u.nombre`
+       ORDER BY u.nombre`,
     );
     res.json(resultado.rows);
   } catch (error) {
@@ -136,7 +137,7 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
       `INSERT INTO usuarios (nombre, usuario, contrasena_hash, rol_id, activo)
        VALUES ($1, $2, $3, $4, TRUE)
        RETURNING id, nombre, usuario, rol_id, activo, fecha_creacion`,
-      [nombre, usuario, contrasenaHash, rol_id]
+      [nombre, usuario, contrasenaHash, rol_id],
     );
     const nuevoUsuario = resultado.rows[0];
 
@@ -147,7 +148,7 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
       await client.query(
         `INSERT INTO empleados (nombre, puesto, fecha_ingreso, usuario_id, activo)
          VALUES ($1, $2, $3, $4, TRUE)`,
-        [nombre, PUESTO_POR_ROL[nombreRol] || nombreRol, fechaHoyNegocio(), nuevoUsuario.id]
+        [nombre, PUESTO_POR_ROL[nombreRol] || nombreRol, fechaHoyNegocio(), nuevoUsuario.id],
       );
     }
 
@@ -195,10 +196,10 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
     // Solo si el nombre de usuario cambia se comprueba que nadie MÁS lo tenga
     // (`id != $2` excluye a la propia cuenta que se está editando).
     if (nuevoUsuario !== usuarioActual.usuario) {
-      const yaExiste = await client.query(
-        'SELECT id FROM usuarios WHERE usuario = $1 AND id != $2',
-        [nuevoUsuario, id]
-      );
+      const yaExiste = await client.query('SELECT id FROM usuarios WHERE usuario = $1 AND id != $2', [
+        nuevoUsuario,
+        id,
+      ]);
       if (yaExiste.rows.length > 0) {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'Ese nombre de usuario ya está en uso.' });
@@ -220,7 +221,7 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
       `UPDATE usuarios SET nombre = $1, usuario = $2, rol_id = $3, contrasena_hash = $4
        WHERE id = $5
        RETURNING id, nombre, usuario, rol_id, activo, fecha_creacion`,
-      [nuevoNombre, nuevoUsuario, nuevoRolId, nuevoHash, id]
+      [nuevoNombre, nuevoUsuario, nuevoRolId, nuevoHash, id],
     );
     const usuarioActualizado = resultado.rows[0];
 
@@ -233,34 +234,22 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
       ]);
       const nombreRolNuevo = rolNuevoFila.rows[0]?.nombre;
       const nombreRolViejo = rolViejoFila.rows[0]?.nombre;
-      const empleadoLigado = await client.query(
-        'SELECT id, activo FROM empleados WHERE usuario_id = $1',
-        [id]
-      );
+      const empleadoLigado = await client.query('SELECT id, activo FROM empleados WHERE usuario_id = $1', [id]);
 
       if (nombreRolNuevo === 'administrador' && empleadoLigado.rows.length > 0) {
         // Ahora es administrador: ya no lleva asistencia. Se desactiva su
         // empleado sin perder el historial (nunca se borra, ver PATCH /activo).
-        await client.query('UPDATE empleados SET activo = FALSE WHERE id = $1', [
-          empleadoLigado.rows[0].id,
-        ]);
+        await client.query('UPDATE empleados SET activo = FALSE WHERE id = $1', [empleadoLigado.rows[0].id]);
       } else if (nombreRolViejo === 'administrador' && nombreRolNuevo !== 'administrador') {
         if (empleadoLigado.rows.length > 0) {
           // Ya tenía un empleado (vínculo manual previo, poco común) — se
           // reactiva en vez de crear uno duplicado.
-          await client.query('UPDATE empleados SET activo = TRUE WHERE id = $1', [
-            empleadoLigado.rows[0].id,
-          ]);
+          await client.query('UPDATE empleados SET activo = TRUE WHERE id = $1', [empleadoLigado.rows[0].id]);
         } else {
           await client.query(
             `INSERT INTO empleados (nombre, puesto, fecha_ingreso, usuario_id, activo)
              VALUES ($1, $2, $3, $4, TRUE)`,
-            [
-              nuevoNombre,
-              PUESTO_POR_ROL[nombreRolNuevo] || nombreRolNuevo,
-              fechaHoyNegocio(),
-              id,
-            ]
+            [nuevoNombre, PUESTO_POR_ROL[nombreRolNuevo] || nombreRolNuevo, fechaHoyNegocio(), id],
           );
         }
       }
@@ -269,10 +258,7 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
     // El nombre siempre se refleja en el empleado ligado (si tiene uno),
     // para que Asistencias nunca muestre un nombre viejo tras un rename.
     if (nuevoNombre !== usuarioActual.nombre) {
-      await client.query('UPDATE empleados SET nombre = $1 WHERE usuario_id = $2', [
-        nuevoNombre,
-        id,
-      ]);
+      await client.query('UPDATE empleados SET nombre = $1 WHERE usuario_id = $2', [nuevoNombre, id]);
     }
 
     await client.query('COMMIT');
@@ -302,7 +288,7 @@ router.patch('/:id/activo', requiereRol('administrador'), async (req, res) => {
 
     const resultado = await client.query(
       `UPDATE usuarios SET activo = $1 WHERE id = $2 RETURNING id, nombre, usuario, activo`,
-      [activo, id]
+      [activo, id],
     );
 
     if (resultado.rows.length === 0) {
@@ -349,20 +335,26 @@ router.delete('/:id', requiereRol('administrador'), async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const empleadoLigado = await client.query('SELECT id FROM empleados WHERE usuario_id = $1', [
-      id,
-    ]);
+    const empleadoLigado = await client.query('SELECT id FROM empleados WHERE usuario_id = $1', [id]);
     if (empleadoLigado.rows.length > 0) {
       await client.query('DELETE FROM empleados WHERE id = $1', [empleadoLigado.rows[0].id]);
     }
 
-    const resultado = await client.query('DELETE FROM usuarios WHERE id = $1 RETURNING id', [id]);
+    const resultado = await client.query('DELETE FROM usuarios WHERE id = $1 RETURNING id, nombre, usuario', [id]);
     if (resultado.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Usuario no encontrado.' });
     }
 
     await client.query('COMMIT');
+
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_usuario',
+      detalle: `${resultado.rows[0].nombre} (@${resultado.rows[0].usuario}).`,
+    });
+
     res.json({ id: resultado.rows[0].id, eliminado: true });
   } catch (error) {
     await client.query('ROLLBACK');

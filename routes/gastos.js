@@ -28,17 +28,18 @@
 //   DELETE /historial?desde=&hasta= → ELIMINA todos los gastos del rango de
 //                                   una vez, irreversible (solo administrador)
 // =============================================================================
-const express = require("express");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
-const { fechaValida } = require("../utils/fecha");
+const express = require('express');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
+const { registrarAccion } = require('../utils/bitacora');
+const { fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
 
-const FORMAS_PAGO_VALIDAS = ["efectivo", "transferencia"];
+const FORMAS_PAGO_VALIDAS = ['efectivo', 'transferencia'];
 
 router.use(verificarToken);
-router.use(requiereRol("administrador", "encargado"));
+router.use(requiereRol('administrador', 'encargado'));
 
 function idValido(id) {
   return /^\d+$/.test(id);
@@ -58,71 +59,53 @@ const SELECT_GASTO = `
 `;
 
 // GET /api/gastos/categorias
-router.get("/categorias", async (req, res) => {
+router.get('/categorias', async (req, res) => {
   try {
-    const resultado = await pool.query(
-      "SELECT id, nombre FROM categorias_gasto ORDER BY nombre",
-    );
+    const resultado = await pool.query('SELECT id, nombre FROM categorias_gasto ORDER BY nombre');
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res
-      .status(500)
-      .json({ error: "Error al obtener las categorías de gasto." });
+    res.status(500).json({ error: 'Error al obtener las categorías de gasto.' });
   }
 });
 
 // POST /api/gastos/categorias
-router.post("/categorias", async (req, res) => {
+router.post('/categorias', async (req, res) => {
   const { nombre } = req.body;
   if (!nombre?.trim()) {
-    return res
-      .status(400)
-      .json({ error: "El nombre de la categoría es obligatorio." });
+    return res.status(400).json({ error: 'El nombre de la categoría es obligatorio.' });
   }
   try {
-    const resultado = await pool.query(
-      "INSERT INTO categorias_gasto (nombre) VALUES ($1) RETURNING id, nombre",
-      [nombre.trim()],
-    );
+    const resultado = await pool.query('INSERT INTO categorias_gasto (nombre) VALUES ($1) RETURNING id, nombre', [
+      nombre.trim(),
+    ]);
     res.status(201).json(resultado.rows[0]);
   } catch (error) {
-    if (error.code === "23505") {
-      return res
-        .status(409)
-        .json({ error: "Ya existe una categoría con ese nombre." });
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'Ya existe una categoría con ese nombre.' });
     }
     console.error(error);
-    res.status(500).json({ error: "Error al crear la categoría de gasto." });
+    res.status(500).json({ error: 'Error al crear la categoría de gasto.' });
   }
 });
 
 // GET /api/gastos?desde=&hasta=&categoria_id=&forma_pago=&proveedor_id=&buscar=
-router.get("/", async (req, res) => {
-  const { desde, hasta, categoria_id, forma_pago, proveedor_id, buscar } =
-    req.query;
+router.get('/', async (req, res) => {
+  const { desde, hasta, categoria_id, forma_pago, proveedor_id, buscar } = req.query;
 
   if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
-    return res
-      .status(400)
-      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
   }
   if (categoria_id && !idValido(categoria_id)) {
-    return res
-      .status(400)
-      .json({ error: "El id de categoría debe ser numérico." });
+    return res.status(400).json({ error: 'El id de categoría debe ser numérico.' });
   }
   if (proveedor_id && !idValido(proveedor_id)) {
-    return res
-      .status(400)
-      .json({ error: "El id de proveedor debe ser numérico." });
+    return res.status(400).json({ error: 'El id de proveedor debe ser numérico.' });
   }
   if (forma_pago && !FORMAS_PAGO_VALIDAS.includes(forma_pago)) {
-    return res
-      .status(400)
-      .json({
-        error: `La forma de pago debe ser una de: ${FORMAS_PAGO_VALIDAS.join(", ")}.`,
-      });
+    return res.status(400).json({
+      error: `La forma de pago debe ser una de: ${FORMAS_PAGO_VALIDAS.join(', ')}.`,
+    });
   }
 
   try {
@@ -147,69 +130,46 @@ router.get("/", async (req, res) => {
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener los gastos." });
+    res.status(500).json({ error: 'Error al obtener los gastos.' });
   }
 });
 
 // POST /api/gastos
 // Cuerpo esperado: { categoria_id, concepto, monto, fecha, forma_pago,
 //                     es_recurrente?, proveedor_id?, nota? }
-router.post("/", async (req, res) => {
-  const {
-    categoria_id,
-    concepto,
-    monto,
-    fecha,
-    forma_pago,
-    es_recurrente,
-    proveedor_id,
-    nota,
-  } = req.body;
+router.post('/', async (req, res) => {
+  const { categoria_id, concepto, monto, fecha, forma_pago, es_recurrente, proveedor_id, nota } = req.body;
 
   if (!Number.isInteger(categoria_id)) {
-    return res.status(400).json({ error: "La categoría es obligatoria." });
+    return res.status(400).json({ error: 'La categoría es obligatoria.' });
   }
   if (!concepto?.trim()) {
-    return res.status(400).json({ error: "El concepto es obligatorio." });
+    return res.status(400).json({ error: 'El concepto es obligatorio.' });
   }
-  if (typeof monto !== "number" || monto <= 0) {
-    return res.status(400).json({ error: "El monto debe ser mayor a cero." });
+  if (typeof monto !== 'number' || monto <= 0) {
+    return res.status(400).json({ error: 'El monto debe ser mayor a cero.' });
   }
   if (!fecha || !fechaValida(fecha)) {
-    return res
-      .status(400)
-      .json({ error: "La fecha debe tener el formato AAAA-MM-DD." });
+    return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
   }
   if (!FORMAS_PAGO_VALIDAS.includes(forma_pago)) {
-    return res
-      .status(400)
-      .json({
-        error: `La forma de pago debe ser una de: ${FORMAS_PAGO_VALIDAS.join(", ")}.`,
-      });
+    return res.status(400).json({
+      error: `La forma de pago debe ser una de: ${FORMAS_PAGO_VALIDAS.join(', ')}.`,
+    });
   }
-  if (
-    proveedor_id !== undefined &&
-    proveedor_id !== null &&
-    !Number.isInteger(proveedor_id)
-  ) {
-    return res.status(400).json({ error: "El proveedor es inválido." });
+  if (proveedor_id !== undefined && proveedor_id !== null && !Number.isInteger(proveedor_id)) {
+    return res.status(400).json({ error: 'El proveedor es inválido.' });
   }
 
   try {
-    const categoria = await pool.query(
-      "SELECT id FROM categorias_gasto WHERE id = $1",
-      [categoria_id],
-    );
+    const categoria = await pool.query('SELECT id FROM categorias_gasto WHERE id = $1', [categoria_id]);
     if (categoria.rows.length === 0) {
-      return res.status(400).json({ error: "La categoría no existe." });
+      return res.status(400).json({ error: 'La categoría no existe.' });
     }
     if (proveedor_id) {
-      const proveedor = await pool.query(
-        "SELECT id FROM proveedores WHERE id = $1",
-        [proveedor_id],
-      );
+      const proveedor = await pool.query('SELECT id FROM proveedores WHERE id = $1', [proveedor_id]);
       if (proveedor.rows.length === 0) {
-        return res.status(400).json({ error: "El proveedor no existe." });
+        return res.status(400).json({ error: 'El proveedor no existe.' });
       }
     }
 
@@ -230,108 +190,71 @@ router.post("/", async (req, res) => {
         req.usuario.id,
       ],
     );
-    const fila = await pool.query(`${SELECT_GASTO} WHERE g.id = $1`, [
-      insertado.rows[0].id,
-    ]);
+    const fila = await pool.query(`${SELECT_GASTO} WHERE g.id = $1`, [insertado.rows[0].id]);
     res.status(201).json(fila.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al registrar el gasto." });
+    res.status(500).json({ error: 'Error al registrar el gasto.' });
   }
 });
 
 // PATCH /api/gastos/:id — edición parcial; campos ausentes conservan su
 // valor actual. Deja auditoría (RNF-02) solo si algo de verdad cambió.
-router.patch("/:id", async (req, res) => {
+router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   if (!idValido(id)) {
-    return res.status(400).json({ error: "El id debe ser numérico." });
+    return res.status(400).json({ error: 'El id debe ser numérico.' });
   }
   const body = req.body;
 
   try {
-    const actual = await pool.query("SELECT * FROM gastos WHERE id = $1", [id]);
+    const actual = await pool.query('SELECT * FROM gastos WHERE id = $1', [id]);
     if (actual.rows.length === 0) {
-      return res.status(404).json({ error: "Gasto no encontrado." });
+      return res.status(404).json({ error: 'Gasto no encontrado.' });
     }
     const fila = actual.rows[0];
 
     if (body.categoria_id !== undefined) {
       if (!Number.isInteger(body.categoria_id)) {
-        return res.status(400).json({ error: "La categoría es inválida." });
+        return res.status(400).json({ error: 'La categoría es inválida.' });
       }
-      const categoria = await pool.query(
-        "SELECT id FROM categorias_gasto WHERE id = $1",
-        [body.categoria_id],
-      );
+      const categoria = await pool.query('SELECT id FROM categorias_gasto WHERE id = $1', [body.categoria_id]);
       if (categoria.rows.length === 0) {
-        return res.status(400).json({ error: "La categoría no existe." });
+        return res.status(400).json({ error: 'La categoría no existe.' });
       }
     }
     if (body.concepto !== undefined && !body.concepto.trim()) {
-      return res
-        .status(400)
-        .json({ error: "El concepto no puede quedar vacío." });
+      return res.status(400).json({ error: 'El concepto no puede quedar vacío.' });
     }
-    if (
-      body.monto !== undefined &&
-      (typeof body.monto !== "number" || body.monto <= 0)
-    ) {
-      return res.status(400).json({ error: "El monto debe ser mayor a cero." });
+    if (body.monto !== undefined && (typeof body.monto !== 'number' || body.monto <= 0)) {
+      return res.status(400).json({ error: 'El monto debe ser mayor a cero.' });
     }
     if (body.fecha !== undefined && !fechaValida(body.fecha)) {
-      return res
-        .status(400)
-        .json({ error: "La fecha debe tener el formato AAAA-MM-DD." });
+      return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
     }
-    if (
-      body.forma_pago !== undefined &&
-      !FORMAS_PAGO_VALIDAS.includes(body.forma_pago)
-    ) {
-      return res
-        .status(400)
-        .json({
-          error: `La forma de pago debe ser una de: ${FORMAS_PAGO_VALIDAS.join(", ")}.`,
-        });
+    if (body.forma_pago !== undefined && !FORMAS_PAGO_VALIDAS.includes(body.forma_pago)) {
+      return res.status(400).json({
+        error: `La forma de pago debe ser una de: ${FORMAS_PAGO_VALIDAS.join(', ')}.`,
+      });
     }
-    if (
-      body.proveedor_id !== undefined &&
-      body.proveedor_id !== null &&
-      !Number.isInteger(body.proveedor_id)
-    ) {
-      return res.status(400).json({ error: "El proveedor es inválido." });
+    if (body.proveedor_id !== undefined && body.proveedor_id !== null && !Number.isInteger(body.proveedor_id)) {
+      return res.status(400).json({ error: 'El proveedor es inválido.' });
     }
     if (body.proveedor_id) {
-      const proveedor = await pool.query(
-        "SELECT id FROM proveedores WHERE id = $1",
-        [body.proveedor_id],
-      );
+      const proveedor = await pool.query('SELECT id FROM proveedores WHERE id = $1', [body.proveedor_id]);
       if (proveedor.rows.length === 0) {
-        return res.status(400).json({ error: "El proveedor no existe." });
+        return res.status(400).json({ error: 'El proveedor no existe.' });
       }
     }
 
-    const categoriaId =
-      body.categoria_id !== undefined ? body.categoria_id : fila.categoria_id;
-    const concepto =
-      body.concepto !== undefined ? body.concepto.trim() : fila.concepto;
+    const categoriaId = body.categoria_id !== undefined ? body.categoria_id : fila.categoria_id;
+    const concepto = body.concepto !== undefined ? body.concepto.trim() : fila.concepto;
     const monto = body.monto !== undefined ? body.monto : Number(fila.monto);
-    const fecha =
-      body.fecha !== undefined
-        ? body.fecha
-        : fila.fecha.toISOString().slice(0, 10);
-    const formaPago =
-      body.forma_pago !== undefined ? body.forma_pago : fila.forma_pago;
-    const esRecurrente =
-      body.es_recurrente !== undefined
-        ? Boolean(body.es_recurrente)
-        : fila.es_recurrente;
-    const proveedorId =
-      body.proveedor_id !== undefined
-        ? body.proveedor_id || null
-        : fila.proveedor_id;
-    const nota =
-      body.nota !== undefined ? body.nota?.trim() || null : fila.nota;
+    const fecha = body.fecha !== undefined ? body.fecha : fila.fecha.toISOString().slice(0, 10);
+    const formaPago = body.forma_pago !== undefined ? body.forma_pago : fila.forma_pago;
+    const esRecurrente = body.es_recurrente !== undefined ? Boolean(body.es_recurrente) : fila.es_recurrente;
+    const proveedorId = body.proveedor_id !== undefined ? body.proveedor_id || null : fila.proveedor_id;
+    const nota = body.nota !== undefined ? body.nota?.trim() || null : fila.nota;
 
     const huboCambio =
       categoriaId !== fila.categoria_id ||
@@ -350,26 +273,14 @@ router.patch("/:id", async (req, res) => {
            editado_por = CASE WHEN $9 THEN $10 ELSE editado_por END,
            fecha_edicion = CASE WHEN $9 THEN NOW() ELSE fecha_edicion END
        WHERE id = $11`,
-      [
-        categoriaId,
-        concepto,
-        monto,
-        fecha,
-        formaPago,
-        esRecurrente,
-        proveedorId,
-        nota,
-        huboCambio,
-        req.usuario.id,
-        id,
-      ],
+      [categoriaId, concepto, monto, fecha, formaPago, esRecurrente, proveedorId, nota, huboCambio, req.usuario.id, id],
     );
 
     const resultado = await pool.query(`${SELECT_GASTO} WHERE g.id = $1`, [id]);
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al actualizar el gasto." });
+    res.status(500).json({ error: 'Error al actualizar el gasto.' });
   }
 });
 
@@ -378,57 +289,54 @@ router.patch("/:id", async (req, res) => {
 // una vez — irreversible. Solo administrador (el resto del archivo ya es
 // admin/encargado; esta acción se restringe más). Registrada ANTES de
 // DELETE /:id para que Express no intente leer "historial" como un id.
-router.delete("/historial", requiereRol("administrador"), async (req, res) => {
+router.delete('/historial', requiereRol('administrador'), async (req, res) => {
   const { desde, hasta } = req.query;
 
   if (!desde || !hasta) {
-    return res
-      .status(400)
-      .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
+    return res.status(400).json({ error: 'Debes indicar un rango de fechas (desde y hasta).' });
   }
   if (!fechaValida(desde) || !fechaValida(hasta)) {
-    return res
-      .status(400)
-      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
   }
   if (hasta < desde) {
-    return res
-      .status(400)
-      .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+    return res.status(400).json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
   }
 
   try {
     const resultado = await pool.query(
-      "DELETE FROM gastos WHERE fecha >= $1::date AND fecha <= $2::date RETURNING id",
+      'DELETE FROM gastos WHERE fecha >= $1::date AND fecha <= $2::date RETURNING id',
       [desde, hasta],
     );
+
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_historial',
+      detalle: `Gastos: ${resultado.rows.length} gasto(s) del ${desde} al ${hasta}.`,
+    });
+
     res.json({ eliminados: resultado.rows.length });
   } catch (error) {
     console.error(error);
-    res
-      .status(500)
-      .json({ error: "Error al eliminar el historial de gastos." });
+    res.status(500).json({ error: 'Error al eliminar el historial de gastos.' });
   }
 });
 
 // DELETE /api/gastos/:id
-router.delete("/:id", async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   if (!idValido(id)) {
-    return res.status(400).json({ error: "El id debe ser numérico." });
+    return res.status(400).json({ error: 'El id debe ser numérico.' });
   }
   try {
-    const resultado = await pool.query(
-      "DELETE FROM gastos WHERE id = $1 RETURNING id",
-      [id],
-    );
+    const resultado = await pool.query('DELETE FROM gastos WHERE id = $1 RETURNING id', [id]);
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Gasto no encontrado." });
+      return res.status(404).json({ error: 'Gasto no encontrado.' });
     }
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al eliminar el gasto." });
+    res.status(500).json({ error: 'Error al eliminar el gasto.' });
   }
 });
 

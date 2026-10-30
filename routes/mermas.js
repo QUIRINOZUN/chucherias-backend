@@ -17,6 +17,7 @@
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
+const { registrarAccion } = require('../utils/bitacora');
 const { diaNegocioSql, fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
@@ -65,7 +66,7 @@ router.get('/', async (req, res) => {
            OR ($3 = 'insumo' AND m.insumo_id IS NOT NULL)
          )
        ORDER BY m.fecha DESC`,
-      [desde || null, hasta || null, tipo || null]
+      [desde || null, hasta || null, tipo || null],
     );
     res.json(resultado.rows);
   } catch (error) {
@@ -96,8 +97,16 @@ router.delete('/historial', requiereRol('administrador'), async (req, res) => {
       `DELETE FROM mermas
        WHERE ${diaNegocioSql('fecha')} >= $1::date AND ${diaNegocioSql('fecha')} <= $2::date
        RETURNING id`,
-      [desde, hasta]
+      [desde, hasta],
     );
+
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_historial',
+      detalle: `Mermas: ${resultado.rows.length} registro(s) del ${desde} al ${hasta}.`,
+    });
+
     res.json({ eliminados: resultado.rows.length });
   } catch (error) {
     console.error(error);
