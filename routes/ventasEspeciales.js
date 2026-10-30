@@ -453,6 +453,66 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
+// DELETE /api/ventas-especiales/historial?desde=&hasta=
+// Elimina TODAS las cotizaciones (y sus productos) cuya fecha_evento caiga
+// en el rango [desde, hasta] (ambos obligatorios), sin importar su estado —
+// irreversible. Solo administrador (el resto del archivo es admin/
+// encargado/cajero). Registrada ANTES de DELETE /:id para que Express no
+// intente leer "historial" como un id.
+router.delete(
+  "/historial",
+  requiereRol("administrador"),
+  async (req, res) => {
+    const { desde, hasta } = req.query;
+
+    if (!desde || !hasta) {
+      return res
+        .status(400)
+        .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
+    }
+    if (!fechaValida(desde) || !fechaValida(hasta)) {
+      return res
+        .status(400)
+        .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    }
+    if (hasta < desde) {
+      return res
+        .status(400)
+        .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const filas = await client.query(
+        "SELECT id FROM ventas_especiales WHERE fecha_evento >= $1::date AND fecha_evento <= $2::date",
+        [desde, hasta],
+      );
+      const ids = filas.rows.map((f) => f.id);
+      if (ids.length > 0) {
+        await client.query(
+          "DELETE FROM venta_especial_detalle WHERE venta_especial_id = ANY($1::int[])",
+          [ids],
+        );
+        await client.query(
+          "DELETE FROM ventas_especiales WHERE id = ANY($1::int[])",
+          [ids],
+        );
+      }
+      await client.query("COMMIT");
+      res.json({ eliminados: ids.length });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error(error);
+      res.status(500).json({
+        error: "Error al eliminar el historial de ventas especiales.",
+      });
+    } finally {
+      client.release();
+    }
+  },
+);
+
 // DELETE /api/ventas-especiales/:id
 // Borra la cotización completa (sus líneas primero, por la FK sin cascada de
 // venta_especial_detalle), sin importar el estado en el que esté — es una

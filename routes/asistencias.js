@@ -480,4 +480,46 @@ router.get("/retardos", async (req, res) => {
   }
 });
 
+// DELETE /api/asistencias/historial?desde=&hasta=
+// Elimina registros de asistencia del rango [desde, hasta] (ambos
+// obligatorios) — irreversible. Cascada automática (ON DELETE CASCADE) a
+// asistencias_historial_correcciones. Solo administrador (el resto de este
+// archivo ya es admin/encargado).
+router.delete(
+  "/historial",
+  requiereRol("administrador"),
+  async (req, res) => {
+    const { desde, hasta } = req.query;
+
+    if (!desde || !hasta) {
+      return res
+        .status(400)
+        .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
+    }
+    if (!fechaValida(desde) || !fechaValida(hasta)) {
+      return res
+        .status(400)
+        .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    }
+    if (hasta < desde) {
+      return res
+        .status(400)
+        .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+    }
+
+    try {
+      const resultado = await pool.query(
+        "DELETE FROM asistencias WHERE fecha >= $1::date AND fecha <= $2::date RETURNING id",
+        [desde, hasta],
+      );
+      res.json({ eliminados: resultado.rows.length });
+    } catch (error) {
+      console.error(error);
+      res
+        .status(500)
+        .json({ error: "Error al eliminar el historial de asistencias." });
+    }
+  },
+);
+
 module.exports = router;

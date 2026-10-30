@@ -27,6 +27,9 @@
 //                               no) + su suma, para el ticket "Listado de
 //                               retiros" que se imprime al hacer el corte
 //                               (administrador, encargado, cajero)
+//   DELETE /historial?desde=&hasta=
+//                             → ELIMINA cortes de caja Y movimientos de caja
+//                               del rango, irreversible (solo administrador)
 //
 // IDEA DEL CORTE (RF-04)
 //   Al cerrar, el cajero cuenta el dinero físico. El sistema suma las ventas
@@ -426,6 +429,43 @@ router.get('/retiros', requiereRol(...ROLES_CAJA), async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al obtener el listado de retiros.' });
+  }
+});
+
+// DELETE /api/caja/historial?desde=&hasta=
+// Elimina cortes de caja Y movimientos de caja (apertura/ingreso/retiro/
+// reembolso) del rango [desde, hasta] (ambos obligatorios) — irreversible,
+// solo administrador. Ninguna otra tabla referencia estas dos (el único FK
+// de movimientos_caja es orden_id, hacia afuera, no entrante), así que
+// borrarlas no rompe nada en otros módulos.
+router.delete('/historial', requiereRol('administrador'), async (req, res) => {
+  const { desde, hasta } = req.query;
+
+  if (!desde || !hasta) {
+    return res.status(400).json({ error: 'Debes indicar un rango de fechas (desde y hasta).' });
+  }
+  if (!fechaValida(desde) || !fechaValida(hasta)) {
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
+  }
+  if (hasta < desde) {
+    return res.status(400).json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+  }
+
+  try {
+    const cortes = await pool.query(
+      `DELETE FROM cortes_caja WHERE fecha >= $1::date AND fecha <= $2::date RETURNING id`,
+      [desde, hasta]
+    );
+    const movimientos = await pool.query(
+      `DELETE FROM movimientos_caja
+       WHERE ${diaNegocioSql('fecha')} >= $1::date AND ${diaNegocioSql('fecha')} <= $2::date
+       RETURNING id`,
+      [desde, hasta]
+    );
+    res.json({ eliminados: { cortes: cortes.rows.length, movimientos: movimientos.rows.length } });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al eliminar el historial de caja.' });
   }
 });
 

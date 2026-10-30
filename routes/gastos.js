@@ -25,6 +25,8 @@
 //                                   diferencia de una venta — corregir un
 //                                   error de captura no necesita el patrón
 //                                   de "nunca se borra")
+//   DELETE /historial?desde=&hasta= → ELIMINA todos los gastos del rango de
+//                                   una vez, irreversible (solo administrador)
 // =============================================================================
 const express = require("express");
 const pool = require("../db");
@@ -368,6 +370,44 @@ router.patch("/:id", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error al actualizar el gasto." });
+  }
+});
+
+// DELETE /api/gastos/historial?desde=&hasta=
+// Elimina TODOS los gastos del rango [desde, hasta] (ambos obligatorios) de
+// una vez — irreversible. Solo administrador (el resto del archivo ya es
+// admin/encargado; esta acción se restringe más). Registrada ANTES de
+// DELETE /:id para que Express no intente leer "historial" como un id.
+router.delete("/historial", requiereRol("administrador"), async (req, res) => {
+  const { desde, hasta } = req.query;
+
+  if (!desde || !hasta) {
+    return res
+      .status(400)
+      .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
+  }
+  if (!fechaValida(desde) || !fechaValida(hasta)) {
+    return res
+      .status(400)
+      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+  }
+  if (hasta < desde) {
+    return res
+      .status(400)
+      .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+  }
+
+  try {
+    const resultado = await pool.query(
+      "DELETE FROM gastos WHERE fecha >= $1::date AND fecha <= $2::date RETURNING id",
+      [desde, hasta],
+    );
+    res.json({ eliminados: resultado.rows.length });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ error: "Error al eliminar el historial de gastos." });
   }
 });
 

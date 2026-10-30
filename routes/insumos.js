@@ -33,6 +33,7 @@ const express = require("express");
 const pool = require("../db");
 const { verificarToken, requiereRol } = require("../middleware/auth");
 const { EXPRESION_EXISTENCIA } = require("../utils/existencia");
+const { diaNegocioSql, fechaValida } = require("../utils/fecha");
 
 const router = express.Router();
 
@@ -454,6 +455,46 @@ router.post("/:id/merma", async (req, res) => {
     res.status(500).json({ error: "Error al registrar la merma." });
   } finally {
     client.release();
+  }
+});
+
+// DELETE /api/insumos/historial?desde=&hasta=
+// Elimina los movimientos de inventario (entradas/ajustes/salidas/mermas)
+// del rango [desde, hasta] (ambos obligatorios) — irreversible, y cambia la
+// existencia calculada de cada insumo (se recalcula sobre lo que quede, ver
+// EXPRESION_EXISTENCIA). Solo administrador.
+router.delete("/historial", requiereRol("administrador"), async (req, res) => {
+  const { desde, hasta } = req.query;
+
+  if (!desde || !hasta) {
+    return res
+      .status(400)
+      .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
+  }
+  if (!fechaValida(desde) || !fechaValida(hasta)) {
+    return res
+      .status(400)
+      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+  }
+  if (hasta < desde) {
+    return res
+      .status(400)
+      .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+  }
+
+  try {
+    const resultado = await pool.query(
+      `DELETE FROM movimientos_inventario
+       WHERE ${diaNegocioSql("fecha")} >= $1::date AND ${diaNegocioSql("fecha")} <= $2::date
+       RETURNING id`,
+      [desde, hasta],
+    );
+    res.json({ eliminados: resultado.rows.length });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ error: "Error al eliminar el historial de inventario." });
   }
 });
 

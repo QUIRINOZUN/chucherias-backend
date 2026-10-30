@@ -205,6 +205,47 @@ router.get(
   },
 );
 
+// DELETE /api/checklist/historial?desde=&hasta=
+// Elimina las marcas de apertura/cierre del rango [desde, hasta] (ambos
+// obligatorios) — irreversible. Solo administrador (consultar el historial
+// de arriba ya es admin/encargado; esta acción se restringe más).
+router.delete(
+  "/historial",
+  requiereRol("administrador"),
+  async (req, res) => {
+    const { desde, hasta } = req.query;
+
+    if (!desde || !hasta) {
+      return res
+        .status(400)
+        .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
+    }
+    if (!fechaValida(desde) || !fechaValida(hasta)) {
+      return res
+        .status(400)
+        .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    }
+    if (hasta < desde) {
+      return res
+        .status(400)
+        .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+    }
+
+    try {
+      const resultado = await pool.query(
+        "DELETE FROM checklist_marcas WHERE fecha >= $1::date AND fecha <= $2::date RETURNING id",
+        [desde, hasta],
+      );
+      res.json({ eliminados: resultado.rows.length });
+    } catch (error) {
+      console.error(error);
+      res
+        .status(500)
+        .json({ error: "Error al eliminar el historial del checklist." });
+    }
+  },
+);
+
 // A partir de aquí, solo gestión del catálogo (administrador/encargado) —
 // personalizar los pasos es una decisión de negocio, no una acción diaria.
 router.use(requiereRol("administrador", "encargado"));

@@ -11,6 +11,10 @@
 //                             de 'Ventas de hoy' a 'Ventas'" más abajo.
 //   PATCH /:id/cancelar    → cancelar una venta, total o PARCIAL (RF-03)
 //                            (administrador, encargado)
+//   DELETE /historial?desde=&hasta=
+//                           → ELIMINA todas las ventas/órdenes del rango,
+//                             irreversible (solo administrador) — ver
+//                             sección "ELIMINAR HISTORIAL" más abajo.
 //
 // 2026-10-22: de "Ventas de hoy" a "Ventas" — el módulo pasó de mostrar
 // solo el día en curso a ser la consulta general de tickets (RF implícito:
@@ -970,5 +974,105 @@ router.patch(
     }
   },
 );
+
+// =============================================================================
+// ELIMINAR HISTORIAL (2026-10-29) — acción de alto riesgo, solo administrador
+// =============================================================================
+// DELETE /api/ventas/historial?desde=&hasta=
+// Borra TODAS las ventas y sus órdenes cuyo día del negocio caiga dentro del
+// rango [desde, hasta] (ambos obligatorios) — irreversible, sin confirmación
+// adicional del servidor (la confirmación vive en el frontend).
+//
+// Las filas de OTROS módulos que referencian estas órdenes/ventas (mermas,
+// movimientos de caja, movimientos de inventario, historial de lealtad) NO
+// se borran aquí: se DESLIGAN (su orden_id/venta_id queda en NULL) para que
+// ese historial siga existiendo bajo su propio botón "Eliminar historial" en
+// su propia pantalla — borrar Ventas no debe borrar Caja/Inventario/Mermas
+// por sorpresa.
+router.delete("/historial", requiereRol("administrador"), async (req, res) => {
+  const { desde, hasta } = req.query;
+
+  if (!desde || !hasta) {
+    return res
+      .status(400)
+      .json({ error: "Debes indicar un rango de fechas (desde y hasta)." });
+  }
+  if (!fechaValida(desde) || !fechaValida(hasta)) {
+    return res
+      .status(400)
+      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+  }
+  if (hasta < desde) {
+    return res
+      .status(400)
+      .json({ error: 'La fecha "hasta" no puede ser anterior a "desde".' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const filas = await client.query(
+      `SELECT v.id AS venta_id, o.id AS orden_id
+       FROM ventas v
+       JOIN ordenes o ON o.id = v.orden_id
+       WHERE ${diaNegocioSql("v.fecha")} >= $1::date
+         AND ${diaNegocioSql("v.fecha")} <= $2::date`,
+      [desde, hasta],
+    );
+    const ventaIds = filas.rows.map((f) => f.venta_id);
+    const ordenIds = filas.rows.map((f) => f.orden_id);
+
+    if (ventaIds.length > 0) {
+      await client.query(
+        `UPDATE lealtad_historial SET venta_id = NULL WHERE venta_id = ANY($1::int[])`,
+        [ventaIds],
+      );
+      await client.query(
+        `UPDATE movimientos_caja SET orden_id = NULL WHERE orden_id = ANY($1::int[])`,
+        [ordenIds],
+      );
+      await client.query(
+        `UPDATE movimientos_inventario SET orden_id = NULL WHERE orden_id = ANY($1::int[])`,
+        [ordenIds],
+      );
+      await client.query(
+        `UPDATE mermas SET orden_id = NULL WHERE orden_id = ANY($1::int[])`,
+        [ordenIds],
+      );
+
+      await client.query(
+        `DELETE FROM orden_detalle_insumos
+         WHERE orden_detalle_id IN (SELECT id FROM orden_detalle WHERE orden_id = ANY($1::int[]))`,
+        [ordenIds],
+      );
+      await client.query(
+        `DELETE FROM orden_detalle WHERE orden_id = ANY($1::int[])`,
+        [ordenIds],
+      );
+      await client.query(
+        `DELETE FROM orden_estado_historial WHERE orden_id = ANY($1::int[])`,
+        [ordenIds],
+      );
+      await client.query(`DELETE FROM ventas WHERE id = ANY($1::int[])`, [
+        ventaIds,
+      ]);
+      await client.query(`DELETE FROM ordenes WHERE id = ANY($1::int[])`, [
+        ordenIds,
+      ]);
+    }
+
+    await client.query("COMMIT");
+    res.json({ eliminados: ventaIds.length });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error(error);
+    res
+      .status(500)
+      .json({ error: "Error al eliminar el historial de ventas." });
+  } finally {
+    client.release();
+  }
+});
 
 module.exports = router;
