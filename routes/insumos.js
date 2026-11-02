@@ -17,7 +17,15 @@
 //   GET   /:id/movimientos  → historial de movimientos de un insumo (auditoría)
 //   POST  /                 → crear insumo
 //   PATCH /:id              → editar insumo (nombre, unidad, mínimo, proveedor)
-//   POST  /:id/entrada      → registrar entrada de mercancía (sube existencia)
+//   POST  /:id/entrada      → registrar entrada de mercancía (sube existencia).
+//                             Desde 2026-10-31 acepta también costo_unitario
+//                             (cuánto costó ESTA compra): si llega, actualiza
+//                             insumos.costo_unitario (el costo "vigente", que
+//                             ya usan Costeo/Reportes) y guarda un historial
+//                             de solo consulta en insumo_compras — NUNCA
+//                             promedio ponderado, ver CLAUDE.md.
+//   GET   /:id/compras      → historial de compras de un insumo (cuánto
+//                             costó cada vez), más reciente primero
 //   POST  /:id/ajuste       → corrección manual de existencia (+/-, con motivo)
 //   POST  /:id/merma        → merma manual de un insumo (RF-13: se cayó,
 //                             caducó, etc. — independiente de una venta)
@@ -64,13 +72,24 @@ router.use(requiereRol('administrador', 'encargado'));
 // GET /api/insumos
 // Lista todos los insumos con su existencia calculada y si está en o por
 // debajo de su cantidad_minima (alerta de reabastecimiento).
+//
+// en_uso (2026-11-01): true si el insumo ya tiene algún movimiento de
+// inventario O alguna receta que lo use. Lo necesita el frontend para
+// avisar antes de dejar cambiar unidad_medida — cambiarla reinterpreta en
+// silencio toda cantidad ya guardada (movimientos Y recetas, que asumen
+// que esa columna nunca cambia), así que solo tiene sentido avisar cuando
+// ya hay algo que de verdad se reinterpretaría.
 router.get('/', async (req, res) => {
   try {
     const resultado = await pool.query(
       `SELECT i.id, i.nombre, i.unidad_medida, i.cantidad_minima, i.proveedor_id,
               p.nombre AS proveedor, i.categoria_id, c.nombre AS categoria,
               i.costo_extra, i.costo_unitario,
-              ${EXPRESION_EXISTENCIA} AS existencia
+              ${EXPRESION_EXISTENCIA} AS existencia,
+              (
+                EXISTS (SELECT 1 FROM movimientos_inventario mi WHERE mi.insumo_id = i.id)
+                OR EXISTS (SELECT 1 FROM receta_insumos ri WHERE ri.insumo_id = i.id)
+              ) AS en_uso
        FROM insumos i
        LEFT JOIN proveedores p ON p.id = i.proveedor_id
        LEFT JOIN categorias_insumo c ON c.id = i.categoria_id
@@ -199,6 +218,18 @@ router.post('/', async (req, res) => {
 // PATCH /api/insumos/:id
 // Edita un insumo existente. Edición parcial: cada campo que no llegue
 // conserva su valor actual (mismo patrón que PATCH /api/usuarios/:id).
+//
+// CORRECCIÓN (2026-11-01): "Captura rápida de costos" (frontend) usa esta
+// misma ruta para escribir SOLO costo_unitario, sin pasar nunca por
+// POST /:id/entrada — así que, a diferencia de una entrada con costo, no
+// dejaba ningún rastro en insumo_compras (el historial de "cuánto costó
+// cada vez"). Resultado: dos caminos escribiendo el mismo campo sin
+// relación entre sí, y el historial de compras podía quedar incompleto o
+// desincronizado del costo vigente real. Ahora, si costo_unitario de
+// verdad cambia (a un número > 0, el mismo CHECK que ya exige
+// insumo_compras), esta ruta también guarda una fila de historial —
+// cantidad/proveedor en NULL (no hubo una compra real con esos datos,
+// solo una corrección de costo) y una nota que lo deja claro.
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   const { nombre, unidad_medida, cantidad_minima, proveedor_id, categoria_id, costo_extra, costo_unitario } = req.body;
@@ -210,9 +241,13 @@ router.patch('/:id', async (req, res) => {
     return res.status(400).json({ error: 'El costo unitario no puede ser negativo.' });
   }
 
+  const client = await pool.connect();
   try {
-    const actual = await pool.query('SELECT * FROM insumos WHERE id = $1', [id]);
+    await client.query('BEGIN');
+
+    const actual = await client.query('SELECT * FROM insumos WHERE id = $1', [id]);
     if (actual.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Insumo no encontrado.' });
     }
     const insumoActual = actual.rows[0];
@@ -228,7 +263,7 @@ router.patch('/:id', async (req, res) => {
     const nuevoCostoExtra = costo_extra !== undefined ? costo_extra || null : insumoActual.costo_extra;
     const nuevoCostoUnitario = costo_unitario !== undefined ? costo_unitario || null : insumoActual.costo_unitario;
 
-    const resultado = await pool.query(
+    const resultado = await client.query(
       `UPDATE insumos SET nombre = $1, unidad_medida = $2, cantidad_minima = $3, proveedor_id = $4,
                           categoria_id = $5, costo_extra = $6, costo_unitario = $7
        WHERE id = $8
@@ -244,44 +279,125 @@ router.patch('/:id', async (req, res) => {
         id,
       ],
     );
+
+    const costoAnteriorNum = insumoActual.costo_unitario != null ? Number(insumoActual.costo_unitario) : null;
+    const costoNuevoNum = nuevoCostoUnitario != null ? Number(nuevoCostoUnitario) : null;
+    if (costoNuevoNum != null && costoNuevoNum > 0 && costoNuevoNum !== costoAnteriorNum) {
+      await client.query(
+        `INSERT INTO insumo_compras (insumo_id, costo_unitario, cantidad, proveedor_id, registrado_por, nota)
+         VALUES ($1, $2, NULL, NULL, $3, 'Captura rápida de costos (sin una compra registrada)')`,
+        [id, costoNuevoNum, req.usuario.id],
+      );
+    }
+
+    await client.query('COMMIT');
     res.json(resultado.rows[0]);
   } catch (error) {
+    await client.query('ROLLBACK');
     if (error.code === '23503') {
       return res.status(400).json({ error: 'El proveedor o la categoría indicados no existen.' });
     }
     console.error(error);
     res.status(500).json({ error: 'Error al actualizar el insumo.' });
+  } finally {
+    client.release();
   }
 });
 
 // POST /api/insumos/:id/entrada
 // Registra una entrada de mercancía (compra recibida): sube la existencia.
 // cantidad debe ser positiva; motivo es opcional (ej. "Compra semanal").
+//
+// costo_unitario (2026-10-31, opcional): cuánto costó ESTA compra. Si
+// llega, en la misma transacción: (a) se guarda una fila en
+// insumo_compras (historial de solo consulta, "cuánto pagué cada vez"), y
+// (b) se actualiza insumos.costo_unitario al valor nuevo — es el costo
+// VIGENTE que ya usan Costeo/Reportes para calcular márgenes, así que una
+// entrada real con su costo real lo mantiene al día sin tener que ir
+// aparte a editar el insumo. Decisión de alcance: sobrescribe, nunca
+// promedio ponderado (ver CLAUDE.md).
 router.post('/:id/entrada', async (req, res) => {
   const { id } = req.params;
-  const { cantidad, motivo } = req.body;
+  const { cantidad, motivo, costo_unitario, proveedor_id } = req.body;
 
   const cantidadNum = Number(cantidad);
   if (!cantidadNum || cantidadNum <= 0) {
     return res.status(400).json({ error: 'La cantidad de la entrada debe ser mayor a cero.' });
   }
+  if (costo_unitario !== undefined && costo_unitario !== null && costo_unitario !== '') {
+    const costoNum = Number(costo_unitario);
+    if (!costoNum || costoNum <= 0) {
+      return res.status(400).json({ error: 'El costo de la compra debe ser mayor a cero.' });
+    }
+  }
 
+  const client = await pool.connect();
   try {
-    const insumo = await pool.query('SELECT id FROM insumos WHERE id = $1', [id]);
+    await client.query('BEGIN');
+
+    const insumo = await client.query('SELECT id FROM insumos WHERE id = $1', [id]);
     if (insumo.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Insumo no encontrado.' });
     }
+    if (proveedor_id) {
+      const proveedor = await client.query('SELECT id FROM proveedores WHERE id = $1', [proveedor_id]);
+      if (proveedor.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'El proveedor no existe.' });
+      }
+    }
 
-    const resultado = await pool.query(
+    const movimiento = await client.query(
       `INSERT INTO movimientos_inventario (insumo_id, tipo, cantidad, responsable_id, motivo)
        VALUES ($1, 'entrada', $2, $3, $4)
        RETURNING id, tipo, cantidad, fecha, motivo`,
       [id, cantidadNum, req.usuario.id, motivo?.trim() || 'Entrada de mercancía'],
     );
-    res.status(201).json(resultado.rows[0]);
+
+    const costoNum =
+      costo_unitario !== undefined && costo_unitario !== null && costo_unitario !== '' ? Number(costo_unitario) : null;
+    if (costoNum) {
+      await client.query(
+        `INSERT INTO insumo_compras (insumo_id, costo_unitario, cantidad, proveedor_id, registrado_por, movimiento_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, costoNum, cantidadNum, proveedor_id || null, req.usuario.id, movimiento.rows[0].id],
+      );
+      await client.query('UPDATE insumos SET costo_unitario = $1 WHERE id = $2', [costoNum, id]);
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({ ...movimiento.rows[0], costo_unitario: costoNum });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error(error);
     res.status(500).json({ error: 'Error al registrar la entrada.' });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/insumos/:id/compras — historial de "cuánto costó cada compra" de
+// un insumo, más reciente primero. Solo las entradas que capturaron un
+// costo (una entrada sin costo no genera fila aquí).
+router.get('/:id/compras', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const resultado = await pool.query(
+      `SELECT c.id, c.costo_unitario, c.cantidad, c.fecha, c.nota,
+              c.proveedor_id, p.nombre AS proveedor_nombre,
+              c.registrado_por, u.nombre AS registrado_por_nombre
+       FROM insumo_compras c
+       JOIN usuarios u ON u.id = c.registrado_por
+       LEFT JOIN proveedores p ON p.id = c.proveedor_id
+       WHERE c.insumo_id = $1
+       ORDER BY c.fecha DESC`,
+      [id],
+    );
+    res.json(resultado.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener el historial de compras.' });
   }
 });
 
