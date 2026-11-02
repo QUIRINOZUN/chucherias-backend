@@ -870,11 +870,37 @@ router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (
     // EN ESTA OPERACIÓN (nunca el total completo de la venta, por si ya hubo
     // una cancelación parcial anterior) — movimiento de caja, mismo mecanismo
     // que un retiro (resta del efectivo esperado), ligado a la orden. ----
-    if (valorTotalMerma > 0) {
+    //
+    // El monto es lo que de verdad se COBRÓ por lo cancelado, no el precio de
+    // lista (valorTotalMerma, que sigue siendo el valor para la merma):
+    //  - Cancelación total: lo que quede por devolver de ventas.total (el
+    //    cobrado real, ya con descuento de lealtad y recargos), restando
+    //    reembolsos de cancelaciones parciales anteriores.
+    //  - Cancelación parcial: precio de las líneas + sus recargos
+    //    (costo_extra_aplicado), prorrateado por la proporción total/subtotal
+    //    de la venta para que también absorba el descuento de lealtad.
+    let montoReembolso = 0;
+    if (lineasRestantes === 0) {
+      const yaReembolsado = await client.query(
+        `SELECT COALESCE(SUM(monto), 0) AS total FROM movimientos_caja WHERE orden_id = $1 AND tipo = 'reembolso'`,
+        [ordenId],
+      );
+      montoReembolso = Math.max(Number(venta.rows[0].total) - Number(yaReembolsado.rows[0].total), 0);
+    } else {
+      const extras = await client.query(
+        `SELECT COALESCE(SUM(costo_extra_aplicado), 0) AS total FROM orden_detalle_insumos
+         WHERE orden_detalle_id = ANY($1::int[])`,
+        [lineasACancelar.map((l) => l.id)],
+      );
+      const subtotalVenta = Number(venta.rows[0].subtotal);
+      const proporcion = subtotalVenta > 0 ? Number(venta.rows[0].total) / subtotalVenta : 1;
+      montoReembolso = Math.round((valorTotalMerma + Number(extras.rows[0].total)) * proporcion * 100) / 100;
+    }
+    if (montoReembolso > 0) {
       await client.query(
         `INSERT INTO movimientos_caja (tipo, monto, motivo, responsable_id, confirmado, confirmado_por, fecha_confirmacion, orden_id)
          VALUES ('reembolso', $1, $2, $3, TRUE, $3, NOW(), $4)`,
-        [valorTotalMerma, `Reembolso por cancelación — orden ${numeroOrden}`, req.usuario.id, ordenId],
+        [montoReembolso, `Reembolso por cancelación — orden ${numeroOrden}`, req.usuario.id, ordenId],
       );
     }
 
@@ -900,7 +926,7 @@ router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (
       mermas_generadas: lineasACancelar.length,
       mermas_valor_total: valorTotalMerma.toFixed(2),
       insumos_restituidos: insumosRestituidos,
-      monto_reembolso: valorTotalMerma.toFixed(2),
+      monto_reembolso: montoReembolso.toFixed(2),
       lealtad_revertida: lealtadRevertida,
     });
   } catch (error) {
