@@ -37,10 +37,20 @@ router.get('/', async (req, res) => {
 
   try {
     // Una merma de producto trae variante_id (nombre = producto + variante,
-    // valor_total = lo que costaba ese producto); una de insumo trae
-    // insumo_id (nombre = el insumo, con su unidad; sin valor en pesos — no
-    // se le captura un costo unitario al insumo todavía). `numero_orden` solo
-    // existe para las que vienen de cancelar una venta.
+    // valor_total = m.valor_unitario, CONGELADO al momento de cancelar la
+    // venta — igual que orden_detalle.precio_unitario, nunca cambia aunque
+    // el precio real del producto cambie después).
+    //
+    // Una merma de insumo trae insumo_id: NO se congela ningún valor al
+    // momento de la merma (`mermas.valor_unitario` se deja en NULL para
+    // estas — ver routes/insumos.js, POST /:id/merma). Desde que Costeo
+    // (2026-10-27) le dio a cada insumo un costo_unitario, esta ruta sí
+    // puede mostrar un valor en pesos — pero es una ESTIMACIÓN con el costo
+    // VIGENTE de HOY, no el que tenía el insumo el día de la merma (que
+    // nunca se guardó). `valor_estimado = true` marca esta diferencia para
+    // que el frontend nunca lo trate como un valor congelado/histórico
+    // igual que el de producto. Un insumo sin costo_unitario capturado
+    // sigue devolviendo valor_total = NULL (sin inventar un número).
     const resultado = await pool.query(
       `SELECT m.id, m.fecha, m.cantidad, m.motivo, m.estado_orden_previo,
               u.nombre AS responsable,
@@ -51,7 +61,12 @@ router.get('/', async (req, res) => {
               END AS nombre,
               i.unidad_medida,
               o.numero_orden,
-              CASE WHEN m.valor_unitario IS NOT NULL THEN m.valor_unitario * m.cantidad ELSE NULL END AS valor_total
+              CASE
+                WHEN m.valor_unitario IS NOT NULL THEN m.valor_unitario * m.cantidad
+                WHEN m.insumo_id IS NOT NULL AND i.costo_unitario IS NOT NULL THEN i.costo_unitario * m.cantidad
+                ELSE NULL
+              END AS valor_total,
+              (m.insumo_id IS NOT NULL AND i.costo_unitario IS NOT NULL) AS valor_estimado
        FROM mermas m
        JOIN usuarios u ON u.id = m.responsable_id
        LEFT JOIN variantes_producto vp ON vp.id = m.variante_id
