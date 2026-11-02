@@ -105,6 +105,24 @@ app.use(
 // Convierte automáticamente el cuerpo JSON de cada petición en req.body.
 app.use(express.json());
 
+// Diagnóstico para el monitor que mantiene despierto el servidor (ver
+// .github/workflows/mantener-despierto.yml). Se registra ANTES de montar
+// cualquier router porque catalogoRoutes se monta en /api a secas con
+// verificarToken: si esta ruta quedara después, respondería 401 sin sesión
+// y el ping nunca llegaría a la base de datos.
+// Ruta de prueba: confirma que la conexión a Neon funciona.
+// Útil para "despertar" la base de datos gratuita antes de la primera venta
+// del día (Neon duerme tras 5 minutos de inactividad).
+app.get('/api/ping-db', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({ conectado: true, hora_servidor: result.rows[0].now });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ conectado: false, error: error.message });
+  }
+});
+
 // -----------------------------------------------------------------------------
 // Montaje de rutas
 // -----------------------------------------------------------------------------
@@ -152,19 +170,6 @@ app.use('/api/bitacora', bitacoraRoutes);
 // Ruta de prueba: confirma que el servidor está vivo
 app.get('/', (req, res) => {
   res.json({ mensaje: 'API de CHUCHERIAS funcionando correctamente' });
-});
-
-// Ruta de prueba: confirma que la conexión a Neon funciona.
-// Útil para "despertar" la base de datos gratuita antes de la primera venta
-// del día (Neon duerme tras 5 minutos de inactividad).
-app.get('/api/ping-db', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({ conectado: true, hora_servidor: result.rows[0].now });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ conectado: false, error: error.message });
-  }
 });
 
 // Render asigna el puerto por variable de entorno; en local se usa el 3000.

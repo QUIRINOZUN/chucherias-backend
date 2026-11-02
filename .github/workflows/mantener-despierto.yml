@@ -1,0 +1,41 @@
+# =============================================================================
+# mantener-despierto.yml — Evita que Render y Neon "duerman" en horario de operación
+# =============================================================================
+# Render (plan gratuito) duerme el servidor tras 15 min sin peticiones y Neon
+# tras 5 min; la primera petición después de dormir puede tardar hasta ~90 s
+# (RNF-04). Este flujo consulta /api/ping-db cada 12 minutos SOLO durante el
+# horario de operación, así la primera venta del turno no espera ese arranque
+# y no se gastan horas gratuitas con el negocio cerrado.
+#
+# Horario del negocio: 2:00 pm – 9:30 pm hora de Durango (UTC-6, sin horario
+# de verano), martes a domingo. En UTC:
+#   - 19:00–23:59 UTC de martes a domingo        (1:00 pm – 5:59 pm local)
+#   - 00:00–03:59 UTC de miércoles a lunes       (6:00 pm – 9:59 pm local)
+# El segundo bloque cae en el día UTC siguiente, por eso sus días van
+# desplazados un día (el lunes local por la noche cae en martes UTC y no se
+# incluye). Empieza una hora antes de abrir para que ya esté despierto.
+#
+# Notas de GitHub Actions: los horarios programados pueden retrasarse varios
+# minutos y se pausan si el repositorio no tiene actividad en 60 días (en ese
+# caso, reactivar desde la pestaña Actions). Se puede lanzar a mano con
+# "Run workflow".
+# =============================================================================
+name: Mantener despierto el servidor
+
+on:
+  schedule:
+    - cron: '*/12 19-23 * * 0,2-6'
+    - cron: '*/12 0-3 * * 0,1,3-6'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Consultar /api/ping-db
+        run: |
+          # El primer intento puede tardar si el servidor estaba dormido.
+          curl --silent --show-error --fail --max-time 120 \
+            --retry 2 --retry-delay 10 \
+            https://chucherias-backend.onrender.com/api/ping-db
