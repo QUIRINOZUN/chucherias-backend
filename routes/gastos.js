@@ -18,7 +18,13 @@
 //                                   opcionales y combinables (sin filtros,
 //                                   todo el histórico — mismo criterio que
 //                                   mermas/reportes/ventas-especiales)
-//   POST   /                     → registrar un gasto
+//   GET    /alertas              → gastos recurrentes cuya fecha de pago
+//                                   (dia_pago_mes) ya se acerca o ya venció
+//                                   este mes, y que todavía no se han
+//                                   vuelto a registrar — ver "2026-10-31:
+//                                   alertas de pago recurrente" más abajo
+//   POST   /                     → registrar un gasto (acepta dia_pago_mes/
+//                                   dias_aviso_previo si es_recurrente)
 //   PATCH  /:id                  → editar (deja auditoría RNF-02)
 //   DELETE /:id                  → eliminar (un gasto no tiene historial
 //                                   transaccional que dependa de él, a
@@ -32,7 +38,7 @@ const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
-const { fechaValida } = require('../utils/fecha');
+const { fechaValida, fechaHoyNegocio } = require('../utils/fecha');
 
 const router = express.Router();
 
@@ -48,6 +54,7 @@ function idValido(id) {
 const SELECT_GASTO = `
   SELECT g.id, g.categoria_id, cg.nombre AS categoria, g.concepto, g.monto,
          to_char(g.fecha, 'YYYY-MM-DD') AS fecha, g.forma_pago, g.es_recurrente,
+         g.dia_pago_mes, g.dias_aviso_previo,
          g.proveedor_id, p.nombre AS proveedor_nombre, g.nota,
          g.registrado_por, u.nombre AS registrado_por_nombre, g.fecha_registro,
          g.editado_por, ue.nombre AS editado_por_nombre, g.fecha_edicion
@@ -134,11 +141,94 @@ router.get('/', async (req, res) => {
   }
 });
 
+// GET /api/gastos/alertas — 2026-10-31: gastos recurrentes que se acercan a
+// (o ya pasaron) su día de pago este mes, y que todavía no se han vuelto a
+// registrar en el mes en curso. Decisión de alcance: "día fijo del mes +
+// aviso N días antes" (ver CLAUDE.md) — ambos campos se capturan por gasto
+// recurrente (dia_pago_mes, dias_aviso_previo), no en una configuración
+// aparte.
+//
+// Se agrupa por (categoria_id, concepto) — esa pareja es la "serie" del
+// gasto recurrente (ej. "Servicios" + "Renta local" es una serie, "Gastos
+// generales" + "Internet" es otra). Se toma SIEMPRE la captura más
+// reciente de cada serie como plantilla (monto, dia_pago_mes,
+// dias_aviso_previo) y se excluye cualquier serie que YA tenga un gasto
+// registrado este mes calendario — ya se pagó, no hace falta avisar.
+//
+// Registrada ANTES de GET /:id — espera, este archivo no tiene GET /:id,
+// así que no hay colisión de rutas; se deja aquí, junto a GET /, por
+// cercanía temática.
+router.get('/alertas', async (req, res) => {
+  try {
+    const resultado = await pool.query(`
+      WITH series AS (
+        SELECT DISTINCT ON (g.categoria_id, g.concepto)
+               g.categoria_id, g.concepto, g.monto, g.dia_pago_mes, g.dias_aviso_previo
+        FROM gastos g
+        WHERE g.es_recurrente = TRUE AND g.dia_pago_mes IS NOT NULL
+        ORDER BY g.categoria_id, g.concepto, g.fecha DESC
+      )
+      SELECT s.categoria_id, cg.nombre AS categoria, s.concepto, s.monto,
+             s.dia_pago_mes, s.dias_aviso_previo
+      FROM series s
+      JOIN categorias_gasto cg ON cg.id = s.categoria_id
+      WHERE NOT EXISTS (
+        SELECT 1 FROM gastos g2
+        WHERE g2.categoria_id = s.categoria_id AND g2.concepto = s.concepto AND g2.es_recurrente = TRUE
+          AND date_trunc('month', g2.fecha) = date_trunc('month', CURRENT_DATE)
+      )
+    `);
+
+    const hoy = new Date(`${fechaHoyNegocio()}T00:00:00`);
+    const anio = hoy.getFullYear();
+    const mes = hoy.getMonth();
+    const ultimoDiaMes = new Date(anio, mes + 1, 0).getDate();
+
+    const alertas = resultado.rows
+      .map((fila) => {
+        const diaObjetivo = Math.min(fila.dia_pago_mes, ultimoDiaMes);
+        const fechaObjetivo = new Date(anio, mes, diaObjetivo);
+        const diasRestantes = Math.round((fechaObjetivo - hoy) / (1000 * 60 * 60 * 24));
+        return {
+          categoria_id: fila.categoria_id,
+          categoria: fila.categoria,
+          concepto: fila.concepto,
+          monto_ultimo: Number(fila.monto),
+          dia_pago_mes: fila.dia_pago_mes,
+          dias_restantes: diasRestantes,
+          dias_aviso_previo: fila.dias_aviso_previo,
+          vencido: diasRestantes < 0,
+        };
+      })
+      // Solo lo que ya entró en su propia ventana de aviso (días_restantes
+      // <= dias_aviso_previo) — el resto todavía no es una alerta real.
+      .filter((alerta) => alerta.dias_restantes <= alerta.dias_aviso_previo)
+      .sort((a, b) => a.dias_restantes - b.dias_restantes);
+
+    res.json(alertas);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener las alertas de gastos recurrentes.' });
+  }
+});
+
 // POST /api/gastos
 // Cuerpo esperado: { categoria_id, concepto, monto, fecha, forma_pago,
-//                     es_recurrente?, proveedor_id?, nota? }
+//                     es_recurrente?, dia_pago_mes?, dias_aviso_previo?,
+//                     proveedor_id?, nota? }
 router.post('/', async (req, res) => {
-  const { categoria_id, concepto, monto, fecha, forma_pago, es_recurrente, proveedor_id, nota } = req.body;
+  const {
+    categoria_id,
+    concepto,
+    monto,
+    fecha,
+    forma_pago,
+    es_recurrente,
+    dia_pago_mes,
+    dias_aviso_previo,
+    proveedor_id,
+    nota,
+  } = req.body;
 
   if (!Number.isInteger(categoria_id)) {
     return res.status(400).json({ error: 'La categoría es obligatoria.' });
@@ -160,6 +250,20 @@ router.post('/', async (req, res) => {
   if (proveedor_id !== undefined && proveedor_id !== null && !Number.isInteger(proveedor_id)) {
     return res.status(400).json({ error: 'El proveedor es inválido.' });
   }
+  if (
+    dia_pago_mes !== undefined &&
+    dia_pago_mes !== null &&
+    (!Number.isInteger(dia_pago_mes) || dia_pago_mes < 1 || dia_pago_mes > 31)
+  ) {
+    return res.status(400).json({ error: 'El día de pago debe ser un número entre 1 y 31.' });
+  }
+  if (
+    dias_aviso_previo !== undefined &&
+    dias_aviso_previo !== null &&
+    (!Number.isInteger(dias_aviso_previo) || dias_aviso_previo < 0)
+  ) {
+    return res.status(400).json({ error: 'Los días de aviso previo no pueden ser negativos.' });
+  }
 
   try {
     const categoria = await pool.query('SELECT id FROM categorias_gasto WHERE id = $1', [categoria_id]);
@@ -175,8 +279,9 @@ router.post('/', async (req, res) => {
 
     const insertado = await pool.query(
       `INSERT INTO gastos
-         (categoria_id, concepto, monto, fecha, forma_pago, es_recurrente, proveedor_id, nota, registrado_por)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (categoria_id, concepto, monto, fecha, forma_pago, es_recurrente,
+          dia_pago_mes, dias_aviso_previo, proveedor_id, nota, registrado_por)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
       [
         categoria_id,
@@ -185,6 +290,8 @@ router.post('/', async (req, res) => {
         fecha,
         forma_pago,
         Boolean(es_recurrente),
+        es_recurrente ? dia_pago_mes || null : null,
+        dias_aviso_previo ?? 3,
         proveedor_id || null,
         nota?.trim() || null,
         req.usuario.id,
@@ -256,6 +363,27 @@ router.patch('/:id', async (req, res) => {
     const proveedorId = body.proveedor_id !== undefined ? body.proveedor_id || null : fila.proveedor_id;
     const nota = body.nota !== undefined ? body.nota?.trim() || null : fila.nota;
 
+    if (
+      body.dia_pago_mes !== undefined &&
+      body.dia_pago_mes !== null &&
+      (!Number.isInteger(body.dia_pago_mes) || body.dia_pago_mes < 1 || body.dia_pago_mes > 31)
+    ) {
+      return res.status(400).json({ error: 'El día de pago debe ser un número entre 1 y 31.' });
+    }
+    if (
+      body.dias_aviso_previo !== undefined &&
+      body.dias_aviso_previo !== null &&
+      (!Number.isInteger(body.dias_aviso_previo) || body.dias_aviso_previo < 0)
+    ) {
+      return res.status(400).json({ error: 'Los días de aviso previo no pueden ser negativos.' });
+    }
+    const diaPagoMes = body.dia_pago_mes !== undefined ? body.dia_pago_mes || null : fila.dia_pago_mes;
+    const diasAvisoPrevio =
+      body.dias_aviso_previo !== undefined ? (body.dias_aviso_previo ?? 3) : fila.dias_aviso_previo;
+    // Sin es_recurrente, dia_pago_mes nunca se queda capturado (no tendría
+    // ningún uso: la alerta solo mira gastos con es_recurrente = TRUE).
+    const diaPagoMesFinal = esRecurrente ? diaPagoMes : null;
+
     const huboCambio =
       categoriaId !== fila.categoria_id ||
       concepto !== fila.concepto ||
@@ -263,17 +391,33 @@ router.patch('/:id', async (req, res) => {
       fecha !== fila.fecha.toISOString().slice(0, 10) ||
       formaPago !== fila.forma_pago ||
       esRecurrente !== fila.es_recurrente ||
+      diaPagoMesFinal !== fila.dia_pago_mes ||
+      diasAvisoPrevio !== fila.dias_aviso_previo ||
       proveedorId !== fila.proveedor_id ||
       nota !== fila.nota;
 
     await pool.query(
       `UPDATE gastos
        SET categoria_id = $1, concepto = $2, monto = $3, fecha = $4, forma_pago = $5,
-           es_recurrente = $6, proveedor_id = $7, nota = $8,
-           editado_por = CASE WHEN $9 THEN $10 ELSE editado_por END,
-           fecha_edicion = CASE WHEN $9 THEN NOW() ELSE fecha_edicion END
-       WHERE id = $11`,
-      [categoriaId, concepto, monto, fecha, formaPago, esRecurrente, proveedorId, nota, huboCambio, req.usuario.id, id],
+           es_recurrente = $6, dia_pago_mes = $7, dias_aviso_previo = $8, proveedor_id = $9, nota = $10,
+           editado_por = CASE WHEN $11 THEN $12 ELSE editado_por END,
+           fecha_edicion = CASE WHEN $11 THEN NOW() ELSE fecha_edicion END
+       WHERE id = $13`,
+      [
+        categoriaId,
+        concepto,
+        monto,
+        fecha,
+        formaPago,
+        esRecurrente,
+        diaPagoMesFinal,
+        diasAvisoPrevio,
+        proveedorId,
+        nota,
+        huboCambio,
+        req.usuario.id,
+        id,
+      ],
     );
 
     const resultado = await pool.query(`${SELECT_GASTO} WHERE g.id = $1`, [id]);
