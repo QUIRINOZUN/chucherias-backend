@@ -11,8 +11,15 @@
 // Gestión (solo administrador/encargado — antes el menú SOLO se cargaba con
 // scripts/seed-catalogo.js; esto es la primera API para editarlo desde la
 // app, parte del submódulo "Menú" dentro de Recetario):
-//   POST   /api/categorias                     → crear categoría
-//   PATCH  /api/categorias/:id                 → renombrar categoría
+//   POST   /api/categorias                     → crear categoría (acepta
+//                                                 icono/color opcionales,
+//                                                 2026-10-31 — ver nota
+//                                                 abajo)
+//   PATCH  /api/categorias/:id                 → renombrar categoría /
+//                                                 personalizar su icono y
+//                                                 color (o quitarlos, para
+//                                                 volver al estilo por
+//                                                 defecto)
 //   DELETE /api/categorias/:id                 → eliminar (solo si no tiene
 //                                                 productos)
 //   POST   /api/productos                      → crear producto
@@ -56,18 +63,18 @@
 // el tablero de cocina). Este archivo solo lo guarda/expone, no decide nada
 // con él.
 // =============================================================================
-const express = require("express");
-const multer = require("multer");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
-const { subirImagen, borrarImagen } = require("../utils/cloudinary");
-const { EXPRESION_EXISTENCIA } = require("../utils/existencia");
+const express = require('express');
+const multer = require('multer');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
+const { subirImagen, borrarImagen } = require('../utils/cloudinary');
+const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
 
 const router = express.Router();
 
 router.use(verificarToken);
 
-const GESTION = requiereRol("administrador", "encargado");
+const GESTION = requiereRol('administrador', 'encargado');
 
 // Multer en memoria (no a disco): el archivo solo existe mientras dura la
 // petición, luego se manda directo a Cloudinary como buffer — Render no
@@ -78,8 +85,8 @@ const uploadImagen = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith("image/")) {
-      return cb(new Error("El archivo debe ser una imagen."));
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('El archivo debe ser una imagen.'));
     }
     cb(null, true);
   },
@@ -89,70 +96,111 @@ const uploadImagen = multer({
 // CATEGORÍAS
 // =====================================================================
 
+// Un color literal #RGB o #RRGGBB (lo que siempre entrega <input
+// type="color"> del navegador) — nunca se valida contra una lista fija,
+// para no limitar la personalización, pero sí se exige que sea un color
+// CSS real y no cualquier texto.
+const COLOR_HEX_VALIDO = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/;
+
+// icono/color llegan como undefined (no tocar), "" o null (quitar la
+// personalización → vuelve al estilo por defecto que ya resuelve
+// pos/categoria-estilos.ts por nombre) o un valor real. Lanza un mensaje
+// de error de validación (string) o devuelve { icono, color } normalizados.
+function normalizarEstiloCategoria(body, actual) {
+  let icono = actual?.icono ?? null;
+  if (body.icono !== undefined) {
+    const limpio = body.icono?.trim();
+    icono = limpio ? limpio.slice(0, 40) : null;
+  }
+  let color = actual?.color ?? null;
+  if (body.color !== undefined) {
+    const limpio = body.color?.trim();
+    if (!limpio) {
+      color = null;
+    } else if (!COLOR_HEX_VALIDO.test(limpio)) {
+      throw new Error('El color debe ser un color válido (ej. #c2410c).');
+    } else {
+      color = limpio;
+    }
+  }
+  return { icono, color };
+}
+
 // GET /api/categorias
-router.get("/categorias", async (req, res) => {
+router.get('/categorias', async (req, res) => {
   try {
-    const resultado = await pool.query(
-      "SELECT id, nombre FROM categorias ORDER BY nombre",
-    );
+    const resultado = await pool.query('SELECT id, nombre, icono, color FROM categorias ORDER BY nombre');
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener las categorías." });
+    res.status(500).json({ error: 'Error al obtener las categorías.' });
   }
 });
 
 // POST /api/categorias
-router.post("/categorias", GESTION, async (req, res) => {
+// Cuerpo: { nombre, icono?, color? } — icono/color son opcionales
+// (2026-10-31); sin ellos, la categoría usa el estilo por defecto.
+router.post('/categorias', GESTION, async (req, res) => {
   const nombre = req.body.nombre?.trim();
   if (!nombre) {
-    return res
-      .status(400)
-      .json({ error: "El nombre de la categoría es obligatorio." });
+    return res.status(400).json({ error: 'El nombre de la categoría es obligatorio.' });
+  }
+  let estilo;
+  try {
+    estilo = normalizarEstiloCategoria(req.body, null);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
   }
   try {
     const resultado = await pool.query(
-      "INSERT INTO categorias (nombre) VALUES ($1) RETURNING id, nombre",
-      [nombre],
+      'INSERT INTO categorias (nombre, icono, color) VALUES ($1, $2, $3) RETURNING id, nombre, icono, color',
+      [nombre, estilo.icono, estilo.color],
     );
     res.status(201).json(resultado.rows[0]);
   } catch (error) {
-    if (error.code === "23505") {
-      return res
-        .status(409)
-        .json({ error: "Ya existe una categoría con ese nombre." });
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'Ya existe una categoría con ese nombre.' });
     }
     console.error(error);
-    res.status(500).json({ error: "Error al crear la categoría." });
+    res.status(500).json({ error: 'Error al crear la categoría.' });
   }
 });
 
 // PATCH /api/categorias/:id
-router.patch("/categorias/:id", GESTION, async (req, res) => {
+// Cuerpo: { nombre?, icono?, color? } — nombre sigue siendo obligatorio si
+// se manda (igual que antes); icono/color son edición parcial: ausentes =
+// se conservan, "" o null = se quitan (vuelve al estilo por defecto).
+router.patch('/categorias/:id', GESTION, async (req, res) => {
   const { id } = req.params;
-  const nombre = req.body.nombre?.trim();
-  if (!nombre) {
-    return res
-      .status(400)
-      .json({ error: "El nombre de la categoría es obligatorio." });
-  }
   try {
-    const resultado = await pool.query(
-      "UPDATE categorias SET nombre = $1 WHERE id = $2 RETURNING id, nombre",
-      [nombre, id],
-    );
-    if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Categoría no encontrada." });
+    const actual = await pool.query('SELECT id, nombre, icono, color FROM categorias WHERE id = $1', [id]);
+    if (actual.rows.length === 0) {
+      return res.status(404).json({ error: 'Categoría no encontrada.' });
     }
+
+    const nombre = req.body.nombre !== undefined ? req.body.nombre?.trim() : actual.rows[0].nombre;
+    if (!nombre) {
+      return res.status(400).json({ error: 'El nombre de la categoría es obligatorio.' });
+    }
+
+    let estilo;
+    try {
+      estilo = normalizarEstiloCategoria(req.body, actual.rows[0]);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    const resultado = await pool.query(
+      'UPDATE categorias SET nombre = $1, icono = $2, color = $3 WHERE id = $4 RETURNING id, nombre, icono, color',
+      [nombre, estilo.icono, estilo.color, id],
+    );
     res.json(resultado.rows[0]);
   } catch (error) {
-    if (error.code === "23505") {
-      return res
-        .status(409)
-        .json({ error: "Ya existe una categoría con ese nombre." });
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'Ya existe una categoría con ese nombre.' });
     }
     console.error(error);
-    res.status(500).json({ error: "Error al editar la categoría." });
+    res.status(500).json({ error: 'Error al editar la categoría.' });
   }
 });
 
@@ -160,26 +208,22 @@ router.patch("/categorias/:id", GESTION, async (req, res) => {
 // Bloqueada (409) si tiene productos asignados (FK de productos.categoria_id,
 // NOT NULL) — moverlos o eliminarlos primero. Nunca se reasignan solos: sería
 // invisible para quien está editando el menú.
-router.delete("/categorias/:id", GESTION, async (req, res) => {
+router.delete('/categorias/:id', GESTION, async (req, res) => {
   const { id } = req.params;
   try {
-    const resultado = await pool.query(
-      "DELETE FROM categorias WHERE id = $1 RETURNING id",
-      [id],
-    );
+    const resultado = await pool.query('DELETE FROM categorias WHERE id = $1 RETURNING id', [id]);
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Categoría no encontrada." });
+      return res.status(404).json({ error: 'Categoría no encontrada.' });
     }
     res.json({ ok: true });
   } catch (error) {
-    if (error.code === "23503") {
+    if (error.code === '23503') {
       return res.status(409).json({
-        error:
-          "No se puede eliminar: todavía tiene productos. Muévelos o elimínalos primero.",
+        error: 'No se puede eliminar: todavía tiene productos. Muévelos o elimínalos primero.',
       });
     }
     console.error(error);
-    res.status(500).json({ error: "Error al eliminar la categoría." });
+    res.status(500).json({ error: 'Error al eliminar la categoría.' });
   }
 });
 
@@ -192,8 +236,8 @@ router.delete("/categorias/:id", GESTION, async (req, res) => {
 // el POS); ?todos=1 trae también los desactivados y, de cada producto, TODAS
 // sus variantes (activas e inactivas) — para la pantalla de gestión del
 // menú, donde hace falta poder reactivarlas.
-router.get("/productos", async (req, res) => {
-  const incluirInactivos = req.query.todos === "1";
+router.get('/productos', async (req, res) => {
+  const incluirInactivos = req.query.todos === '1';
   try {
     const productos = await pool.query(
       `SELECT p.id, p.nombre, p.descripcion, p.imagen_url, p.activo,
@@ -201,7 +245,7 @@ router.get("/productos", async (req, res) => {
               c.id AS categoria_id, c.nombre AS categoria
        FROM productos p
        JOIN categorias c ON c.id = p.categoria_id
-       ${incluirInactivos ? "" : "WHERE p.activo = TRUE"}
+       ${incluirInactivos ? '' : 'WHERE p.activo = TRUE'}
        ORDER BY c.nombre, p.nombre`,
     );
 
@@ -210,7 +254,7 @@ router.get("/productos", async (req, res) => {
               vp.fecha_edicion, u.nombre AS editado_por_nombre
        FROM variantes_producto vp
        LEFT JOIN usuarios u ON u.id = vp.editado_por
-       ${incluirInactivos ? "" : "WHERE vp.activo = TRUE"}
+       ${incluirInactivos ? '' : 'WHERE vp.activo = TRUE'}
        ORDER BY vp.precio`,
     );
 
@@ -267,92 +311,63 @@ router.get("/productos", async (req, res) => {
     res.json(resultado);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener los productos." });
+    res.status(500).json({ error: 'Error al obtener los productos.' });
   }
 });
 
 // POST /api/productos
-router.post("/productos", GESTION, async (req, res) => {
+router.post('/productos', GESTION, async (req, res) => {
   const { categoria_id, nombre, descripcion, imagen_url } = req.body;
   if (!categoria_id || !nombre?.trim()) {
-    return res
-      .status(400)
-      .json({ error: "La categoría y el nombre son obligatorios." });
+    return res.status(400).json({ error: 'La categoría y el nombre son obligatorios.' });
   }
   // requiere_preparacion (2026-10-19): TRUE por default si no llega nada —
   // la inmensa mayoría del catálogo SÍ pasa por cocina; solo los productos
   // que de verdad no necesitan preparación (bebidas embotelladas, botanas de
   // bolsa) se marcan en FALSE desde el formulario.
-  const requierePreparacion =
-    req.body.requiere_preparacion === undefined
-      ? true
-      : !!req.body.requiere_preparacion;
+  const requierePreparacion = req.body.requiere_preparacion === undefined ? true : !!req.body.requiere_preparacion;
   try {
-    const categoria = await pool.query(
-      "SELECT id FROM categorias WHERE id = $1",
-      [categoria_id],
-    );
+    const categoria = await pool.query('SELECT id FROM categorias WHERE id = $1', [categoria_id]);
     if (categoria.rows.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "La categoría indicada no existe." });
+      return res.status(400).json({ error: 'La categoría indicada no existe.' });
     }
     // precio_base: ver nota del encabezado — ningún código de negocio la lee.
     const resultado = await pool.query(
       `INSERT INTO productos (categoria_id, nombre, descripcion, precio_base, imagen_url, activo, requiere_preparacion)
        VALUES ($1, $2, $3, 0, $4, TRUE, $5)
        RETURNING id, categoria_id, nombre, descripcion, imagen_url, activo, requiere_preparacion`,
-      [
-        categoria_id,
-        nombre.trim(),
-        descripcion?.trim() || null,
-        imagen_url?.trim() || null,
-        requierePreparacion,
-      ],
+      [categoria_id, nombre.trim(), descripcion?.trim() || null, imagen_url?.trim() || null, requierePreparacion],
     );
     res.status(201).json({ ...resultado.rows[0], variantes: [] });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al crear el producto." });
+    res.status(500).json({ error: 'Error al crear el producto.' });
   }
 });
 
 // PATCH /api/productos/:id
-router.patch("/productos/:id", GESTION, async (req, res) => {
+router.patch('/productos/:id', GESTION, async (req, res) => {
   const { id } = req.params;
   const { categoria_id, nombre, descripcion, imagen_url } = req.body;
 
   try {
-    const actual = await pool.query("SELECT * FROM productos WHERE id = $1", [
-      id,
-    ]);
+    const actual = await pool.query('SELECT * FROM productos WHERE id = $1', [id]);
     if (actual.rows.length === 0) {
-      return res.status(404).json({ error: "Producto no encontrado." });
+      return res.status(404).json({ error: 'Producto no encontrado.' });
     }
     const productoActual = actual.rows[0];
 
     let nuevaCategoriaId = productoActual.categoria_id;
     if (categoria_id !== undefined) {
-      const categoria = await pool.query(
-        "SELECT id FROM categorias WHERE id = $1",
-        [categoria_id],
-      );
+      const categoria = await pool.query('SELECT id FROM categorias WHERE id = $1', [categoria_id]);
       if (categoria.rows.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "La categoría indicada no existe." });
+        return res.status(400).json({ error: 'La categoría indicada no existe.' });
       }
       nuevaCategoriaId = categoria_id;
     }
     const nuevoNombre = nombre?.trim() || productoActual.nombre;
-    const nuevaDescripcion =
-      descripcion !== undefined
-        ? descripcion?.trim() || null
-        : productoActual.descripcion;
-    const nuevaImagen =
-      imagen_url !== undefined
-        ? imagen_url?.trim() || null
-        : productoActual.imagen_url;
+    const nuevaDescripcion = descripcion !== undefined ? descripcion?.trim() || null : productoActual.descripcion;
+    const nuevaImagen = imagen_url !== undefined ? imagen_url?.trim() || null : productoActual.imagen_url;
     // requiere_preparacion: undefined = no tocar (conserva el valor actual).
     const nuevoRequierePreparacion =
       req.body.requiere_preparacion === undefined
@@ -363,38 +378,31 @@ router.patch("/productos/:id", GESTION, async (req, res) => {
       `UPDATE productos SET categoria_id = $1, nombre = $2, descripcion = $3, imagen_url = $4, requiere_preparacion = $5
        WHERE id = $6
        RETURNING id, categoria_id, nombre, descripcion, imagen_url, activo, requiere_preparacion`,
-      [
-        nuevaCategoriaId,
-        nuevoNombre,
-        nuevaDescripcion,
-        nuevaImagen,
-        nuevoRequierePreparacion,
-        id,
-      ],
+      [nuevaCategoriaId, nuevoNombre, nuevaDescripcion, nuevaImagen, nuevoRequierePreparacion, id],
     );
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al editar el producto." });
+    res.status(500).json({ error: 'Error al editar el producto.' });
   }
 });
 
 // PATCH /api/productos/:id/activo
-router.patch("/productos/:id/activo", GESTION, async (req, res) => {
+router.patch('/productos/:id/activo', GESTION, async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body;
   try {
-    const resultado = await pool.query(
-      "UPDATE productos SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo",
-      [!!activo, id],
-    );
+    const resultado = await pool.query('UPDATE productos SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo', [
+      !!activo,
+      id,
+    ]);
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Producto no encontrado." });
+      return res.status(404).json({ error: 'Producto no encontrado.' });
     }
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al actualizar el producto." });
+    res.status(500).json({ error: 'Error al actualizar el producto.' });
   }
 });
 
@@ -405,38 +413,30 @@ router.patch("/productos/:id/activo", GESTION, async (req, res) => {
 // foto, la anterior se borra de Cloudinary tras subir la nueva — "mejor
 // esfuerzo": si ese borrado falla no se interrumpe la subida nueva, solo
 // queda un archivo huérfano en la cuenta (no rompe nada del sistema).
-router.post("/productos/:id/imagen", GESTION, (req, res) => {
-  uploadImagen.single("imagen")(req, res, async (errorMulter) => {
+router.post('/productos/:id/imagen', GESTION, (req, res) => {
+  uploadImagen.single('imagen')(req, res, async (errorMulter) => {
     if (errorMulter) {
       return res.status(400).json({
-        error: errorMulter.message || "No se pudo procesar el archivo.",
+        error: errorMulter.message || 'No se pudo procesar el archivo.',
       });
     }
     if (!req.file) {
-      return res
-        .status(400)
-        .json({ error: 'Falta el archivo de imagen (campo "imagen").' });
+      return res.status(400).json({ error: 'Falta el archivo de imagen (campo "imagen").' });
     }
 
     const { id } = req.params;
     try {
-      const producto = await pool.query(
-        "SELECT id, imagen_public_id FROM productos WHERE id = $1",
-        [id],
-      );
+      const producto = await pool.query('SELECT id, imagen_public_id FROM productos WHERE id = $1', [id]);
       if (producto.rows.length === 0) {
-        return res.status(404).json({ error: "Producto no encontrado." });
+        return res.status(404).json({ error: 'Producto no encontrado.' });
       }
 
-      const subida = await subirImagen(req.file.buffer, "chucherias/productos");
+      const subida = await subirImagen(req.file.buffer, 'chucherias/productos');
 
       const publicIdAnterior = producto.rows[0].imagen_public_id;
       if (publicIdAnterior) {
         await borrarImagen(publicIdAnterior).catch((error) => {
-          console.error(
-            "No se pudo borrar la imagen anterior de Cloudinary:",
-            error,
-          );
+          console.error('No se pudo borrar la imagen anterior de Cloudinary:', error);
         });
       }
 
@@ -448,7 +448,7 @@ router.post("/productos/:id/imagen", GESTION, (req, res) => {
       res.json(resultado.rows[0]);
     } catch (error) {
       console.error(error);
-      res.status(500).json({ error: "Error al subir la imagen." });
+      res.status(500).json({ error: 'Error al subir la imagen.' });
     }
   });
 });
@@ -456,20 +456,17 @@ router.post("/productos/:id/imagen", GESTION, (req, res) => {
 // DELETE /api/productos/:id/imagen
 // Quita la foto del producto (vuelve al bloque de color de categoría en el
 // POS) y la borra de Cloudinary.
-router.delete("/productos/:id/imagen", GESTION, async (req, res) => {
+router.delete('/productos/:id/imagen', GESTION, async (req, res) => {
   const { id } = req.params;
   try {
-    const producto = await pool.query(
-      "SELECT id, imagen_public_id FROM productos WHERE id = $1",
-      [id],
-    );
+    const producto = await pool.query('SELECT id, imagen_public_id FROM productos WHERE id = $1', [id]);
     if (producto.rows.length === 0) {
-      return res.status(404).json({ error: "Producto no encontrado." });
+      return res.status(404).json({ error: 'Producto no encontrado.' });
     }
     const publicId = producto.rows[0].imagen_public_id;
     if (publicId) {
       await borrarImagen(publicId).catch((error) => {
-        console.error("No se pudo borrar la imagen de Cloudinary:", error);
+        console.error('No se pudo borrar la imagen de Cloudinary:', error);
       });
     }
     const resultado = await pool.query(
@@ -480,7 +477,7 @@ router.delete("/productos/:id/imagen", GESTION, async (req, res) => {
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al quitar la imagen." });
+    res.status(500).json({ error: 'Error al quitar la imagen.' });
   }
 });
 
@@ -489,39 +486,29 @@ router.delete("/productos/:id/imagen", GESTION, async (req, res) => {
 // producto) primero. Nunca se borran en cascada sin que quien edita el menú
 // lo vea paso a paso. Si tenía una foto propia, se borra de Cloudinary de
 // paso (ya no la referencia ningún producto).
-router.delete("/productos/:id", GESTION, async (req, res) => {
+router.delete('/productos/:id', GESTION, async (req, res) => {
   const { id } = req.params;
   try {
-    const variantes = await pool.query(
-      "SELECT id FROM variantes_producto WHERE producto_id = $1 LIMIT 1",
-      [id],
-    );
+    const variantes = await pool.query('SELECT id FROM variantes_producto WHERE producto_id = $1 LIMIT 1', [id]);
     if (variantes.rows.length > 0) {
       return res.status(409).json({
-        error:
-          "No se puede eliminar: todavía tiene variantes. Elimínalas primero.",
+        error: 'No se puede eliminar: todavía tiene variantes. Elimínalas primero.',
       });
     }
-    const producto = await pool.query(
-      "SELECT imagen_public_id FROM productos WHERE id = $1",
-      [id],
-    );
-    const resultado = await pool.query(
-      "DELETE FROM productos WHERE id = $1 RETURNING id",
-      [id],
-    );
+    const producto = await pool.query('SELECT imagen_public_id FROM productos WHERE id = $1', [id]);
+    const resultado = await pool.query('DELETE FROM productos WHERE id = $1 RETURNING id', [id]);
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Producto no encontrado." });
+      return res.status(404).json({ error: 'Producto no encontrado.' });
     }
     if (producto.rows[0]?.imagen_public_id) {
       await borrarImagen(producto.rows[0].imagen_public_id).catch((error) => {
-        console.error("No se pudo borrar la imagen de Cloudinary:", error);
+        console.error('No se pudo borrar la imagen de Cloudinary:', error);
       });
     }
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al eliminar el producto." });
+    res.status(500).json({ error: 'Error al eliminar el producto.' });
   }
 });
 
@@ -530,23 +517,18 @@ router.delete("/productos/:id", GESTION, async (req, res) => {
 // =====================================================================
 
 // POST /api/productos/:productoId/variantes
-router.post("/productos/:productoId/variantes", GESTION, async (req, res) => {
+router.post('/productos/:productoId/variantes', GESTION, async (req, res) => {
   const { productoId } = req.params;
   const { nombre, precio } = req.body;
   const precioNum = Number(precio);
 
   if (!nombre?.trim() || !Number.isFinite(precioNum) || precioNum <= 0) {
-    return res
-      .status(400)
-      .json({ error: "El nombre y un precio mayor a cero son obligatorios." });
+    return res.status(400).json({ error: 'El nombre y un precio mayor a cero son obligatorios.' });
   }
   try {
-    const producto = await pool.query(
-      "SELECT id FROM productos WHERE id = $1",
-      [productoId],
-    );
+    const producto = await pool.query('SELECT id FROM productos WHERE id = $1', [productoId]);
     if (producto.rows.length === 0) {
-      return res.status(404).json({ error: "Producto no encontrado." });
+      return res.status(404).json({ error: 'Producto no encontrado.' });
     }
     const resultado = await pool.query(
       `INSERT INTO variantes_producto (producto_id, nombre, precio, activo)
@@ -554,27 +536,22 @@ router.post("/productos/:productoId/variantes", GESTION, async (req, res) => {
        RETURNING id, producto_id, nombre, precio, activo`,
       [productoId, nombre.trim(), precioNum],
     );
-    res
-      .status(201)
-      .json({ ...resultado.rows[0], precio: Number(resultado.rows[0].precio) });
+    res.status(201).json({ ...resultado.rows[0], precio: Number(resultado.rows[0].precio) });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al crear la variante." });
+    res.status(500).json({ error: 'Error al crear la variante.' });
   }
 });
 
 // PATCH /api/variantes/:id
-router.patch("/variantes/:id", GESTION, async (req, res) => {
+router.patch('/variantes/:id', GESTION, async (req, res) => {
   const { id } = req.params;
   const { nombre, precio } = req.body;
 
   try {
-    const actual = await pool.query(
-      "SELECT * FROM variantes_producto WHERE id = $1",
-      [id],
-    );
+    const actual = await pool.query('SELECT * FROM variantes_producto WHERE id = $1', [id]);
     if (actual.rows.length === 0) {
-      return res.status(404).json({ error: "Variante no encontrada." });
+      return res.status(404).json({ error: 'Variante no encontrada.' });
     }
     const varianteActual = actual.rows[0];
 
@@ -583,9 +560,7 @@ router.patch("/variantes/:id", GESTION, async (req, res) => {
     if (precio !== undefined) {
       const precioNum = Number(precio);
       if (!Number.isFinite(precioNum) || precioNum <= 0) {
-        return res
-          .status(400)
-          .json({ error: "El precio debe ser mayor a cero." });
+        return res.status(400).json({ error: 'El precio debe ser mayor a cero.' });
       }
       nuevoPrecio = precioNum;
     }
@@ -607,26 +582,26 @@ router.patch("/variantes/:id", GESTION, async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al editar la variante." });
+    res.status(500).json({ error: 'Error al editar la variante.' });
   }
 });
 
 // PATCH /api/variantes/:id/activo
-router.patch("/variantes/:id/activo", GESTION, async (req, res) => {
+router.patch('/variantes/:id/activo', GESTION, async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body;
   try {
     const resultado = await pool.query(
-      "UPDATE variantes_producto SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo",
+      'UPDATE variantes_producto SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo',
       [!!activo, id],
     );
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Variante no encontrada." });
+      return res.status(404).json({ error: 'Variante no encontrada.' });
     }
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al actualizar la variante." });
+    res.status(500).json({ error: 'Error al actualizar la variante.' });
   }
 });
 
@@ -636,55 +611,39 @@ router.patch("/variantes/:id/activo", GESTION, async (req, res) => {
 // (recetas/receta_insumos/receta_pasos, incluido su tutorial), esa se borra
 // junto con la variante: es metadata interna de cómo se prepara, no un
 // registro de lo que pasó.
-router.delete("/variantes/:id", GESTION, async (req, res) => {
+router.delete('/variantes/:id', GESTION, async (req, res) => {
   const { id } = req.params;
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    const ventas = await client.query(
-      "SELECT id FROM orden_detalle WHERE variante_id = $1 LIMIT 1",
-      [id],
-    );
+    const ventas = await client.query('SELECT id FROM orden_detalle WHERE variante_id = $1 LIMIT 1', [id]);
     if (ventas.rows.length > 0) {
-      await client.query("ROLLBACK");
+      await client.query('ROLLBACK');
       return res.status(409).json({
-        error:
-          "No se puede eliminar: ya tiene ventas registradas. Desactívala en su lugar.",
+        error: 'No se puede eliminar: ya tiene ventas registradas. Desactívala en su lugar.',
       });
     }
 
-    const receta = await client.query(
-      "SELECT id FROM recetas WHERE variante_id = $1",
-      [id],
-    );
+    const receta = await client.query('SELECT id FROM recetas WHERE variante_id = $1', [id]);
     if (receta.rows.length > 0) {
-      await client.query("DELETE FROM receta_insumos WHERE receta_id = $1", [
-        receta.rows[0].id,
-      ]);
-      await client.query("DELETE FROM receta_pasos WHERE receta_id = $1", [
-        receta.rows[0].id,
-      ]);
-      await client.query("DELETE FROM recetas WHERE id = $1", [
-        receta.rows[0].id,
-      ]);
+      await client.query('DELETE FROM receta_insumos WHERE receta_id = $1', [receta.rows[0].id]);
+      await client.query('DELETE FROM receta_pasos WHERE receta_id = $1', [receta.rows[0].id]);
+      await client.query('DELETE FROM recetas WHERE id = $1', [receta.rows[0].id]);
     }
 
-    const resultado = await client.query(
-      "DELETE FROM variantes_producto WHERE id = $1 RETURNING id",
-      [id],
-    );
+    const resultado = await client.query('DELETE FROM variantes_producto WHERE id = $1 RETURNING id', [id]);
     if (resultado.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Variante no encontrada." });
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Variante no encontrada.' });
     }
 
-    await client.query("COMMIT");
+    await client.query('COMMIT');
     res.json({ ok: true });
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query('ROLLBACK');
     console.error(error);
-    res.status(500).json({ error: "Error al eliminar la variante." });
+    res.status(500).json({ error: 'Error al eliminar la variante.' });
   } finally {
     client.release();
   }
