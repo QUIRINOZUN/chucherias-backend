@@ -280,8 +280,14 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     // ---- 3) Detalle de la orden + cálculo del subtotal --------------------
     let subtotal = 0;
     for (const item of items) {
-      // Cantidad inválida o cero se corrige a 1.
-      const cantidad = Number(item.cantidad) > 0 ? Number(item.cantidad) : 1;
+      // Las piezas vendidas son siempre un entero positivo: una cantidad
+      // fraccionaria, cero o negativa solo puede venir de un bug del cliente
+      // o de un payload manipulado — se rechaza en vez de "corregirla" en
+      // silencio (el ROLLBACK de la transacción deja todo como estaba).
+      const cantidad = Number(item.cantidad);
+      if (!Number.isInteger(cantidad) || cantidad <= 0) {
+        throw { status: 400, mensaje: 'La cantidad de cada producto debe ser un número entero mayor a cero.' };
+      }
       const precioUnitario = precioPorVariante[item.variante_id];
       subtotal += precioUnitario * cantidad;
 
@@ -327,6 +333,12 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
       // costo_extra_aplicado para que esta venta conserve lo cobrado aunque
       // el costo_extra del insumo cambie después.
       for (const elegido of item.insumos_elegidos || []) {
+        // Una cantidad negativa o no numérica restaría un valor negativo al
+        // descontar inventario (o sea, sumaría existencia): se rechaza.
+        const cantidadElegida = Number(elegido.cantidad);
+        if (!Number.isFinite(cantidadElegida) || cantidadElegida <= 0) {
+          throw { status: 400, mensaje: 'La cantidad de cada insumo elegido debe ser un número mayor a cero.' };
+        }
         const insumo = await client.query('SELECT id, costo_extra FROM insumos WHERE nombre = $1', [elegido.insumo]);
         if (insumo.rows.length === 0) {
           continue;
