@@ -104,6 +104,32 @@ async function movimientosCajaDelDia(fecha) {
   for (const fila of resultado.rows) {
     totales[fila.tipo] = Number(fila.total);
   }
+
+  // Los reembolsos se separan por método de pago de la venta original y
+  // SOLO cuentan los de ventas que siguen 'completada' (cancelación
+  // parcial). Una cancelación TOTAL ya saca la venta de totalesDelDia()
+  // (estado = 'cancelada'), así que restar además su reembolso descontaría
+  // el mismo dinero dos veces y el corte marcaría un sobrante falso. Y un
+  // reembolso de una venta por transferencia debe salir del total de
+  // transferencia, no del efectivo del cajón (2026-11-02).
+  const reembolsos = await pool.query(
+    `SELECT v.metodo_pago, COALESCE(SUM(mc.monto), 0) AS total
+     FROM movimientos_caja mc
+     JOIN ventas v ON v.orden_id = mc.orden_id
+     WHERE mc.tipo = 'reembolso' AND ${diaNegocioSql('mc.fecha')} = $1
+       AND v.estado = 'completada'
+     GROUP BY v.metodo_pago`,
+    [fecha],
+  );
+  totales.reembolso = 0;
+  totales.reembolsoTransferencia = 0;
+  for (const fila of reembolsos.rows) {
+    if (fila.metodo_pago === 'efectivo') {
+      totales.reembolso = Number(fila.total);
+    } else {
+      totales.reembolsoTransferencia = Number(fila.total);
+    }
+  }
   return totales;
 }
 
@@ -117,11 +143,17 @@ async function movimientosCajaDelDia(fecha) {
 // de abajo incluye ese monto completo, y es el reembolso quien lo resta aquí.
 // Si se restara en los dos lados a la vez quedaría descontado por partida
 // doble; restando solo aquí queda correcto sin tocar el histórico de ventas.
+// Una cancelación TOTAL es distinta: esa venta ya no aparece en ventas_* (su
+// estado es "cancelada"), así que su reembolso NO se resta (ver
+// movimientosCajaDelDia). Los reembolsos de ventas por transferencia restan
+// de total_transferencia, no del efectivo.
 async function resumenCajaDelDia(fecha) {
   const ventas = await totalesDelDia(fecha);
   const movimientos = await movimientosCajaDelDia(fecha);
   const totalEfectivo =
     ventas.efectivo + movimientos.apertura + movimientos.ingreso - movimientos.retiro - movimientos.reembolso;
+
+  const totalTransferencia = ventas.transferencia - movimientos.reembolsoTransferencia;
 
   return {
     ventas_efectivo: ventas.efectivo,
@@ -129,9 +161,10 @@ async function resumenCajaDelDia(fecha) {
     ingresos_efectivo: movimientos.ingreso,
     retiros_efectivo: movimientos.retiro,
     reembolsos_efectivo: movimientos.reembolso,
+    reembolsos_transferencia: movimientos.reembolsoTransferencia,
     total_efectivo: totalEfectivo,
-    total_transferencia: ventas.transferencia,
-    total_sistema: totalEfectivo + ventas.transferencia,
+    total_transferencia: totalTransferencia,
+    total_sistema: totalEfectivo + totalTransferencia,
   };
 }
 
@@ -172,6 +205,21 @@ router.post('/corte', requiereRol('administrador', 'encargado', 'cajero'), async
     });
   }
 
+  // Los montos contados deben ser números finitos y no negativos: un texto
+  // daría NaN (error 500 de Postgres) y un negativo se guardaría tal cual.
+  const efectivoContado = Number(total_efectivo_contado);
+  const transferenciaContada = Number(total_transferencia_contado);
+  if (
+    !Number.isFinite(efectivoContado) ||
+    !Number.isFinite(transferenciaContada) ||
+    efectivoContado < 0 ||
+    transferenciaContada < 0
+  ) {
+    return res.status(400).json({
+      error: 'El efectivo y la transferencia contados deben ser números iguales o mayores a cero.',
+    });
+  }
+
   const fechaCorte = fecha || fechaHoyNegocio();
 
   if (!fechaValida(fechaCorte)) {
@@ -182,7 +230,7 @@ router.post('/corte', requiereRol('administrador', 'encargado', 'cajero'), async
     // El sistema recalcula sus totales en este mismo momento (ventas +
     // apertura/ingresos/retiros del día — ver resumenCajaDelDia arriba).
     const { total_sistema: totalSistema } = await resumenCajaDelDia(fechaCorte);
-    const totalContado = Number(total_efectivo_contado) + Number(total_transferencia_contado);
+    const totalContado = efectivoContado + transferenciaContada;
     // > 0 sobra dinero, < 0 falta dinero, 0 cuadra exacto.
     const diferencia = totalContado - totalSistema;
 
@@ -193,15 +241,7 @@ router.post('/corte', requiereRol('administrador', 'encargado', 'cajero'), async
       `INSERT INTO cortes_caja (fecha, turno, total_efectivo, total_transferencia, total_sistema, diferencia, responsable_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [
-        fechaCorte,
-        turno || null,
-        total_efectivo_contado,
-        total_transferencia_contado,
-        totalSistema,
-        diferencia,
-        req.usuario.id,
-      ],
+      [fechaCorte, turno || null, efectivoContado, transferenciaContada, totalSistema, diferencia, req.usuario.id],
     );
 
     res.status(201).json(resultado.rows[0]);
