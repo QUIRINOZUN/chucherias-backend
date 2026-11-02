@@ -53,24 +53,22 @@
 // `empleados_sin_tarifa`), mismo criterio que ya aplica costo_ventas con
 // insumos sin costo capturado.
 // =============================================================================
-const express = require("express");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
-const { diaNegocioSql, fechaValida } = require("../utils/fecha");
-const { EXPRESION_EXISTENCIA } = require("../utils/existencia");
+const express = require('express');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
+const { diaNegocioSql, fechaValida } = require('../utils/fecha');
+const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
 
 const router = express.Router();
 
 router.use(verificarToken);
-router.use(requiereRol("administrador", "encargado"));
+router.use(requiereRol('administrador', 'encargado'));
 
-router.get("/resumen", async (req, res) => {
+router.get('/resumen', async (req, res) => {
   const { desde, hasta } = req.query;
 
   if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
-    return res
-      .status(400)
-      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
   }
 
   // $1/$2 son `desde`/`hasta` en TODAS las queries de abajo (null = sin ese
@@ -106,8 +104,8 @@ router.get("/resumen", async (req, res) => {
            COUNT(*) FILTER (WHERE estado = 'cancelada')::int AS canceladas,
            COALESCE(SUM(descuento_lealtad) FILTER (WHERE estado = 'completada'), 0) AS descuento_lealtad_total
          FROM ventas
-         WHERE ($1::date IS NULL OR ${diaNegocioSql("fecha")} >= $1::date)
-           AND ($2::date IS NULL OR ${diaNegocioSql("fecha")} <= $2::date)`,
+         WHERE ($1::date IS NULL OR ${diaNegocioSql('fecha')} >= $1::date)
+           AND ($2::date IS NULL OR ${diaNegocioSql('fecha')} <= $2::date)`,
         rango,
       ),
 
@@ -118,13 +116,13 @@ router.get("/resumen", async (req, res) => {
       // ya usa cortes_caja/asistencias). ----
       pool.query(
         `SELECT dia, ventas, monto FROM (
-           SELECT to_char(${diaNegocioSql("fecha")}, 'YYYY-MM-DD') AS dia,
-                  ${diaNegocioSql("fecha")} AS dia_orden,
+           SELECT to_char(${diaNegocioSql('fecha')}, 'YYYY-MM-DD') AS dia,
+                  ${diaNegocioSql('fecha')} AS dia_orden,
                   COUNT(*) FILTER (WHERE estado = 'completada')::int AS ventas,
                   COALESCE(SUM(total) FILTER (WHERE estado = 'completada'), 0) AS monto
            FROM ventas
-           WHERE ($1::date IS NULL OR ${diaNegocioSql("fecha")} >= $1::date)
-             AND ($2::date IS NULL OR ${diaNegocioSql("fecha")} <= $2::date)
+           WHERE ($1::date IS NULL OR ${diaNegocioSql('fecha')} >= $1::date)
+             AND ($2::date IS NULL OR ${diaNegocioSql('fecha')} <= $2::date)
            GROUP BY dia, dia_orden
            ORDER BY dia_orden DESC
            LIMIT 30
@@ -158,8 +156,8 @@ router.get("/resumen", async (req, res) => {
            COUNT(*)::int AS mermas_total,
            COALESCE(SUM(valor_unitario * cantidad) FILTER (WHERE valor_unitario IS NOT NULL), 0) AS mermas_valor_total
          FROM mermas
-         WHERE ($1::date IS NULL OR ${diaNegocioSql("fecha")} >= $1::date)
-           AND ($2::date IS NULL OR ${diaNegocioSql("fecha")} <= $2::date)`,
+         WHERE ($1::date IS NULL OR ${diaNegocioSql('fecha')} >= $1::date)
+           AND ($2::date IS NULL OR ${diaNegocioSql('fecha')} <= $2::date)`,
         rango,
       ),
 
@@ -167,9 +165,7 @@ router.get("/resumen", async (req, res) => {
       // y retardos sí se acotan al periodo. `asistencias.fecha` ya es DATE
       // (el día del negocio se resuelve al capturar la asistencia, no aquí
       // — no hace falta diaNegocioSql sobre una columna que ya es fecha). ----
-      pool.query(
-        `SELECT COUNT(*)::int AS empleados_activos FROM empleados WHERE activo = TRUE`,
-      ),
+      pool.query(`SELECT COUNT(*)::int AS empleados_activos FROM empleados WHERE activo = TRUE`),
       pool.query(
         `SELECT COUNT(*)::int AS asistencias_registradas
          FROM asistencias
@@ -207,8 +203,8 @@ router.get("/resumen", async (req, res) => {
       pool.query(
         `SELECT COUNT(*)::int AS nuevos_en_periodo
          FROM clientes
-         WHERE ($1::date IS NULL OR ${diaNegocioSql("fecha_registro")} >= $1::date)
-           AND ($2::date IS NULL OR ${diaNegocioSql("fecha_registro")} <= $2::date)`,
+         WHERE ($1::date IS NULL OR ${diaNegocioSql('fecha_registro')} >= $1::date)
+           AND ($2::date IS NULL OR ${diaNegocioSql('fecha_registro')} <= $2::date)`,
         rango,
       ),
       // Top 5 por visitas del ciclo ACTUAL (no es "quién visitó más en el
@@ -254,8 +250,8 @@ router.get("/resumen", async (req, res) => {
          LEFT JOIN recetas r ON r.variante_id = od.variante_id
          LEFT JOIN costo_por_receta cpr ON cpr.receta_id = r.id
          WHERE v.estado = 'completada'
-           AND ($1::date IS NULL OR ${diaNegocioSql("v.fecha")} >= $1::date)
-           AND ($2::date IS NULL OR ${diaNegocioSql("v.fecha")} <= $2::date)`,
+           AND ($1::date IS NULL OR ${diaNegocioSql('v.fecha')} >= $1::date)
+           AND ($2::date IS NULL OR ${diaNegocioSql('v.fecha')} <= $2::date)`,
         rango,
       ),
 
@@ -305,17 +301,30 @@ router.get("/resumen", async (req, res) => {
       // ambos se reportan aparte para que la utilidad neta no se vea
       // completa cuando en realidad le falta captura. ----
       pool.query(
+        // Mismo orden de redondeo que nomina.js: primero las horas de CADA
+        // empleado (suma, 2 decimales), luego × tarifa (2 decimales). Y SIN
+        // filtrar por empleado activo: alguien dado de baja que sí trabajó
+        // en el periodo también es costo de ese periodo (nomina.js lo
+        // incluye con todos=1). Si una de las dos reglas cambia, hay que
+        // actualizar también la otra.
         `SELECT
-           COALESCE(SUM(
-             ROUND(EXTRACT(EPOCH FROM (a.hora_salida - a.hora_entrada)) / 3600, 2) * e.pago_por_hora
-           ) FILTER (WHERE a.hora_salida IS NOT NULL AND e.pago_por_hora IS NOT NULL), 0) AS costo_mano_obra,
-           COUNT(*) FILTER (WHERE a.hora_salida IS NULL)::int AS turnos_sin_cerrar,
+           COALESCE(SUM(t.pago), 0) AS costo_mano_obra,
+           COALESCE(SUM(t.sin_cerrar), 0)::int AS turnos_sin_cerrar,
            (SELECT COUNT(*)::int FROM empleados WHERE activo = TRUE AND pago_por_hora IS NULL) AS empleados_sin_tarifa
-         FROM empleados e
-         JOIN asistencias a ON a.empleado_id = e.id
-         WHERE e.activo = TRUE
-           AND ($1::date IS NULL OR a.fecha >= $1::date)
-           AND ($2::date IS NULL OR a.fecha <= $2::date)`,
+         FROM (
+           SELECT e.id,
+                  ROUND(
+                    ROUND(SUM(EXTRACT(EPOCH FROM (a.hora_salida - a.hora_entrada)) / 3600)
+                          FILTER (WHERE a.hora_salida IS NOT NULL), 2) * e.pago_por_hora,
+                    2
+                  ) AS pago,
+                  COUNT(*) FILTER (WHERE a.hora_salida IS NULL) AS sin_cerrar
+           FROM empleados e
+           JOIN asistencias a ON a.empleado_id = e.id
+           WHERE ($1::date IS NULL OR a.fecha >= $1::date)
+             AND ($2::date IS NULL OR a.fecha <= $2::date)
+           GROUP BY e.id, e.pago_por_hora
+         ) t`,
         rango,
       ),
 
@@ -353,19 +362,13 @@ router.get("/resumen", async (req, res) => {
         const costoVentasReal = Number(costoVentas.rows[0].costo_ventas);
         const utilidadBruta = ingresos - costoVentasReal;
         const costoManoObraReal = Number(costoManoObra.rows[0].costo_mano_obra);
-        const gastosGeneralesReal = Number(
-          gastosGenerales.rows[0].gastos_generales,
-        );
-        const utilidadNeta =
-          utilidadBruta - costoManoObraReal - gastosGeneralesReal;
+        const gastosGeneralesReal = Number(gastosGenerales.rows[0].gastos_generales);
+        const utilidadNeta = utilidadBruta - costoManoObraReal - gastosGeneralesReal;
         return {
           ingresos,
           costo_ventas: costoVentasReal,
           utilidad_bruta: utilidadBruta,
-          margen_porcentaje:
-            ingresos > 0
-              ? Math.round((utilidadBruta / ingresos) * 1000) / 10
-              : null,
+          margen_porcentaje: ingresos > 0 ? Math.round((utilidadBruta / ingresos) * 1000) / 10 : null,
           lineas_con_costo: costoVentas.rows[0].lineas_con_costo,
           lineas_sin_costo: costoVentas.rows[0].lineas_sin_costo,
           insumos_sin_costo: costosInsumos.rows[0].insumos_sin_costo,
@@ -384,10 +387,7 @@ router.get("/resumen", async (req, res) => {
           costo_mano_obra: costoManoObraReal,
           gastos_generales: gastosGeneralesReal,
           utilidad_neta: utilidadNeta,
-          utilidad_neta_porcentaje:
-            ingresos > 0
-              ? Math.round((utilidadNeta / ingresos) * 1000) / 10
-              : null,
+          utilidad_neta_porcentaje: ingresos > 0 ? Math.round((utilidadNeta / ingresos) * 1000) / 10 : null,
           turnos_sin_cerrar: costoManoObra.rows[0].turnos_sin_cerrar,
           empleados_sin_tarifa: costoManoObra.rows[0].empleados_sin_tarifa,
         };
@@ -395,7 +395,7 @@ router.get("/resumen", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al generar el reporte." });
+    res.status(500).json({ error: 'Error al generar el reporte.' });
   }
 });
 
