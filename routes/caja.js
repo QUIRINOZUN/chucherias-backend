@@ -229,7 +229,11 @@ router.post('/corte', requiereRol('administrador', 'encargado', 'cajero'), async
   try {
     // El sistema recalcula sus totales en este mismo momento (ventas +
     // apertura/ingresos/retiros del día — ver resumenCajaDelDia arriba).
-    const { total_sistema: totalSistema } = await resumenCajaDelDia(fechaCorte);
+    const {
+      total_sistema: totalSistema,
+      total_efectivo: sistemaEfectivo,
+      total_transferencia: sistemaTransferencia,
+    } = await resumenCajaDelDia(fechaCorte);
     const totalContado = efectivoContado + transferenciaContada;
     // > 0 sobra dinero, < 0 falta dinero, 0 cuadra exacto.
     const diferencia = totalContado - totalSistema;
@@ -237,12 +241,46 @@ router.post('/corte', requiereRol('administrador', 'encargado', 'cajero'), async
     // Se guardan los montos CONTADOS por el cajero (total_efectivo /
     // total_transferencia), lo que esperaba el sistema (total_sistema), la
     // diferencia y quién hizo el corte (responsable_id, tomado del token).
-    const resultado = await pool.query(
-      `INSERT INTO cortes_caja (fecha, turno, total_efectivo, total_transferencia, total_sistema, diferencia, responsable_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [fechaCorte, turno || null, efectivoContado, transferenciaContada, totalSistema, diferencia, req.usuario.id],
-    );
+    // Diferencia POR MÉTODO (2026-11-02): una sola cifra combinada ocultaba
+    // un sobrante en efectivo compensado por un faltante en transferencia (o
+    // al revés). La combinada se sigue guardando igual que siempre.
+    const diferenciaEfectivo = efectivoContado - sistemaEfectivo;
+    const diferenciaTransferencia = transferenciaContada - sistemaTransferencia;
+
+    let resultado;
+    try {
+      resultado = await pool.query(
+        `INSERT INTO cortes_caja
+           (fecha, turno, total_efectivo, total_transferencia, total_sistema, diferencia,
+            diferencia_efectivo, diferencia_transferencia, responsable_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          fechaCorte,
+          turno || null,
+          efectivoContado,
+          transferenciaContada,
+          totalSistema,
+          diferencia,
+          diferenciaEfectivo,
+          diferenciaTransferencia,
+          req.usuario.id,
+        ],
+      );
+    } catch (errorColumnas) {
+      // 42703 = columna inexistente: la migración 2026-11-02 todavía no se
+      // corrió en esta base. Se guarda el corte como siempre en vez de
+      // impedir cerrar la caja por una mejora de reporte.
+      if (errorColumnas.code !== '42703') {
+        throw errorColumnas;
+      }
+      resultado = await pool.query(
+        `INSERT INTO cortes_caja (fecha, turno, total_efectivo, total_transferencia, total_sistema, diferencia, responsable_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [fechaCorte, turno || null, efectivoContado, transferenciaContada, totalSistema, diferencia, req.usuario.id],
+      );
+    }
 
     res.status(201).json(resultado.rows[0]);
   } catch (error) {
@@ -273,9 +311,7 @@ router.get('/cortes', requiereRol('administrador', 'encargado'), async (req, res
     // filtro no enviado (NULL) no restrinja nada, y así una sola consulta
     // sirve para cualquier combinación de filtros.
     const resultado = await pool.query(
-      `SELECT cc.id, to_char(cc.fecha, 'YYYY-MM-DD') AS fecha, cc.turno,
-              cc.total_efectivo, cc.total_transferencia, cc.total_sistema,
-              cc.diferencia, cc.responsable_id, u.nombre AS responsable
+      `SELECT cc.*, to_char(cc.fecha, 'YYYY-MM-DD') AS fecha, u.nombre AS responsable
        FROM cortes_caja cc
        JOIN usuarios u ON u.id = cc.responsable_id
        WHERE ($1::date IS NULL OR cc.fecha >= $1::date)
