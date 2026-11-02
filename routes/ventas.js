@@ -365,22 +365,43 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
       });
     }
 
-    // ---- 4) Lealtad (RF-21/RF-22, 2026-10-15) -----------------------------
+    // ---- 4) Lealtad (RF-21/RF-22, 2026-10-15; configurable desde 2026-10-31)
     // Solo si el cobro trae un cliente_id (opcional — "cliente ocasional" no
     // participa). Reglas de negocio (ver cabecera de routes/clientes.js):
-    // 1 visita/cliente/día, solo si el subtotal >= $100; ciclo de 10
-    // visitas que se reinicia (visita #5 del ciclo = 5%, #10 = 15% y
-    // vuelve a 0). El cálculo vive AQUÍ, no en clientes.js, porque es
-    // aquí donde se conoce el subtotal real de ESTA compra.
+    // 1 visita/cliente/día, solo si el subtotal >= el mínimo configurado;
+    // ciclo de N visitas que se reinicia al llegar al final del ciclo. El
+    // largo del ciclo, el monto mínimo y los escalones (en qué visita, qué
+    // % de descuento) ya NO están hardcodeados — se leen de
+    // lealtad_config/lealtad_escalones (ver routes/lealtad.js, CRUD de
+    // administrador/encargado). El cálculo vive AQUÍ, no en clientes.js ni
+    // en lealtad.js, porque es aquí donde se conoce el subtotal real de
+    // ESTA compra.
     let descuentoLealtad = 0;
     let infoLealtad = null;
     // Ciclo de lealtad a mostrar en el ticket (2026-10-17, ver "potenciar
     // ticket" más abajo): el número de visita del ciclo DESPUÉS de esta
     // compra, para que el comprobante siempre pueda dibujar el avance
-    // "X de 10" aunque esta compra en particular no haya contado una
+    // "X de N" aunque esta compra en particular no haya contado una
     // visita nueva (ej. segunda compra del mismo cliente el mismo día).
     let visitasLealtadParaTicket = null;
+    // Se exponen en la respuesta (ver más abajo) para que el ticket del POS
+    // ya no tenga que adivinar el ciclo/los escalones por su cuenta.
+    let cicloVisitasParaTicket = 10;
+    let cicloCompletadoParaTicket = false;
     if (cliente_id) {
+      const configLealtad = await client.query(
+        'SELECT ciclo_visitas, monto_minimo_compra FROM lealtad_config WHERE id = 1',
+      );
+      const cicloVisitas = configLealtad.rows[0]?.ciclo_visitas ?? 10;
+      const montoMinimo = Number(configLealtad.rows[0]?.monto_minimo_compra ?? 100);
+      cicloVisitasParaTicket = cicloVisitas;
+      const escalonesLealtad = await client.query(
+        'SELECT visita_numero, porcentaje_descuento, descripcion FROM lealtad_escalones',
+      );
+      const escalonPorVisita = new Map(
+        escalonesLealtad.rows.map((e) => [e.visita_numero, Number(e.porcentaje_descuento)]),
+      );
+
       // FOR UPDATE: dos cobros simultáneos del mismo cliente no pueden
       // pisarse el contador de visitas.
       const clienteFila = await client.query(`SELECT id, visitas_acumuladas FROM clientes WHERE id = $1 FOR UPDATE`, [
@@ -403,22 +424,18 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
         [cliente_id, fechaHoyNegocio()],
       );
 
-      if (yaVisitoHoy.rows.length === 0 && subtotal >= 100) {
+      if (yaVisitoHoy.rows.length === 0 && subtotal >= montoMinimo) {
         const visitaNumero = visitasActuales + 1;
-        let descuentoPorcentaje = 0;
-        let nuevasVisitas = visitaNumero;
-        let descripcionDescuento = null;
+        const cicloCompletado = visitaNumero >= cicloVisitas;
+        const descuentoPorcentaje = escalonPorVisita.get(visitaNumero) ?? 0;
+        const nuevasVisitas = cicloCompletado ? 0 : visitaNumero;
+        const descripcionDescuento =
+          descuentoPorcentaje > 0
+            ? escalonesLealtad.rows.find((e) => e.visita_numero === visitaNumero)?.descripcion ||
+              `${descuentoPorcentaje}% por llegar a la visita ${visitaNumero} del ciclo`
+            : null;
 
-        if (visitaNumero === 10) {
-          descuentoPorcentaje = 0.15;
-          nuevasVisitas = 0;
-          descripcionDescuento = '15% por completar el ciclo de 10 visitas';
-        } else if (visitaNumero === 5) {
-          descuentoPorcentaje = 0.05;
-          descripcionDescuento = '5% por llegar a 5 visitas del ciclo';
-        }
-
-        descuentoLealtad = Math.round(subtotal * descuentoPorcentaje * 100) / 100;
+        descuentoLealtad = Math.round(subtotal * (descuentoPorcentaje / 100) * 100) / 100;
 
         infoLealtad = {
           cliente_id,
@@ -427,6 +444,7 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
           descripcionDescuento,
         };
         visitasLealtadParaTicket = nuevasVisitas;
+        cicloCompletadoParaTicket = cicloCompletado;
       }
     }
 
@@ -472,10 +490,14 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     res.status(201).json({
       orden: orden.rows[0],
       venta: venta.rows[0],
-      // Solo informativo para el ticket (avance del ciclo "X de 10"); el
+      // Solo informativo para el ticket (avance del ciclo "X de N"); el
       // descuento real ya vive en venta.descuento_lealtad, esto nunca se
-      // vuelve a usar para calcular dinero.
+      // vuelve a usar para calcular dinero. ciclo_visitas/ciclo_completado
+      // se agregaron el 2026-10-31 (lealtad configurable) para que el
+      // ticket ya no tenga que adivinar el largo del ciclo.
       visitas_lealtad: visitasLealtadParaTicket,
+      ciclo_visitas: cicloVisitasParaTicket,
+      ciclo_completado: cicloCompletadoParaTicket,
     });
   } catch (error) {
     // Cualquier fallo deshace TODO lo escrito arriba: nunca queda una orden
@@ -814,7 +836,13 @@ router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (
       if (visitaLealtad.rows.length > 0) {
         lealtadRevertida = true;
         const visitaNumero = visitaLealtad.rows[0].visita_numero;
-        const nuevasVisitas = visitaNumero === 10 ? 9 : Math.max(visitaNumero - 1, 0);
+        // Ciclo configurable (2026-10-31): se lee el largo vigente del
+        // ciclo en vez del "10" hardcodeado — si esta visita fue la que
+        // cerró el ciclo (y reinició el contador a 0), se revierte a
+        // ciclo-1, no a 9 fijo.
+        const configLealtad = await client.query('SELECT ciclo_visitas FROM lealtad_config WHERE id = 1');
+        const cicloVisitas = configLealtad.rows[0]?.ciclo_visitas ?? 10;
+        const nuevasVisitas = visitaNumero >= cicloVisitas ? cicloVisitas - 1 : Math.max(visitaNumero - 1, 0);
         await client.query(`UPDATE clientes SET visitas_acumuladas = $1 WHERE id = $2`, [
           nuevasVisitas,
           clienteLealtadId,

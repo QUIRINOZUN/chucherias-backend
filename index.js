@@ -50,6 +50,7 @@ const asistenciasRoutes = require('./routes/asistencias');
 const horariosRoutes = require('./routes/horarios');
 const recetasRoutes = require('./routes/recetas');
 const clientesRoutes = require('./routes/clientes');
+const lealtadRoutes = require('./routes/lealtad');
 const reportesRoutes = require('./routes/reportes');
 const checklistRoutes = require('./routes/checklist');
 const nominaRoutes = require('./routes/nomina');
@@ -130,6 +131,8 @@ app.use('/api/horarios', horariosRoutes);
 app.use('/api/recetas', recetasRoutes);
 // Clientes y programa de lealtad (Sprint 4).
 app.use('/api/clientes', clientesRoutes);
+// Configuración del programa de lealtad: ciclo, escalones, monto mínimo (2026-10-31).
+app.use('/api/lealtad', lealtadRoutes);
 // Reporte consolidado — ventas, inventario, personal y clientes (RF-26).
 app.use('/api/reportes', reportesRoutes);
 // Checklist de apertura/cierre (pedido explícito en la entrevista).
