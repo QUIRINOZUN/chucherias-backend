@@ -1,0 +1,89 @@
+# =============================================================================
+# respaldo-semanal.yml — Respaldo semanal CIFRADO de la base de datos (Neon)
+# =============================================================================
+# Cada lunes (el negocio está cerrado) saca una copia completa de la base con
+# pg_dump, la CIFRA con una contraseña y la guarda como "artifact" de GitHub
+# durante 90 días (el máximo del plan gratuito). Quedan unas 12 copias.
+#
+# POR QUÉ CIFRADO: este repositorio es PÚBLICO. Un artifact sin cifrar sería
+# descargable por cualquier persona con cuenta de GitHub, y la base contiene
+# datos de clientes y cuentas del personal. Nunca quitar el cifrado.
+#
+# SECRETOS NECESARIOS (Settings > Secrets and variables > Actions):
+#   DATABASE_URL       cadena de conexión de Neon (la misma de Render).
+#   BACKUP_PASSPHRASE  contraseña larga y aleatoria para cifrar. GUÁRDALA en
+#                      un lugar seguro FUERA de GitHub: sin ella los
+#                      respaldos no se pueden abrir.
+#
+# CÓMO RESTAURAR (en una base nueva o vacía, nunca encima de producción):
+#   gpg --output respaldo.dump --decrypt respaldo-AAAA-MM-DD.dump.gpg
+#   pg_restore --no-owner --no-privileges -d "<cadena de la base nueva>" respaldo.dump
+#
+# Horario: lunes 14:00 UTC = 8:00 am de Durango. Se puede lanzar a mano con
+# "Run workflow" (útil antes de iniciar la prueba piloto o de un cambio grande).
+# Neon usa PostgreSQL 18; pg_dump debe ser de la misma versión o mayor.
+# =============================================================================
+name: Respaldo semanal de la base de datos
+
+on:
+  schedule:
+    - cron: '0 14 * * 1'
+  workflow_dispatch:
+
+jobs:
+  respaldo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Verificar que los secretos existen
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          if [ -z "$DATABASE_URL" ] || [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "Faltan los secretos DATABASE_URL y/o BACKUP_PASSPHRASE en GitHub." >&2
+            exit 1
+          fi
+
+      - name: Instalar el cliente de PostgreSQL 18
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl ca-certificates gnupg
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client-18
+
+      - name: Sacar el respaldo y cifrarlo
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          FECHA=$(date -u +%Y-%m-%d)
+          pg_dump "$DATABASE_URL" --format=custom --no-owner --no-privileges --file=respaldo.dump
+
+          # Verificación: el archivo debe existir, no estar vacío y poder leerse.
+          test -s respaldo.dump
+          TABLAS=$(pg_restore --list respaldo.dump | grep -c "TABLE DATA" || true)
+          echo "Tablas con datos en el respaldo: $TABLAS"
+          if [ "$TABLAS" -lt 10 ]; then
+            echo "El respaldo parece incompleto (menos de 10 tablas con datos)." >&2
+            exit 1
+          fi
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+            --symmetric --cipher-algo AES256 \
+            --output "respaldo-$FECHA.dump.gpg" respaldo.dump
+          rm -f respaldo.dump
+          ls -l "respaldo-$FECHA.dump.gpg"
+          echo "FECHA=$FECHA" >> "$GITHUB_ENV"
+
+      - name: Guardar el respaldo cifrado (90 días)
+        uses: actions/upload-artifact@v4
+        with:
+          name: respaldo-${{ env.FECHA }}
+          path: respaldo-${{ env.FECHA }}.dump.gpg
+          retention-days: 90
+          if-no-files-found: error

@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "respaldo": "node scripts/respaldo.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
