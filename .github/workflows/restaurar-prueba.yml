@@ -79,7 +79,13 @@ jobs:
         run: |
           echo "$PGPASSWORD" > pw.txt
           $PGBIN/initdb -D "$RUNNER_TEMP/pgdata" -U postgres --pwfile=pw.txt -A scram-sha-256 -E UTF8
-          $PGBIN/pg_ctl -D "$RUNNER_TEMP/pgdata" -o "-p $PGPORT -c listen_addresses=127.0.0.1" -l "$RUNNER_TEMP/pg.log" -w start
+          # El socket va a una carpeta propia: /var/run/postgresql no es escribible
+          # por el usuario del runner y el servidor no arrancaría.
+          if ! $PGBIN/pg_ctl -D "$RUNNER_TEMP/pgdata"             -o "-p $PGPORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=$RUNNER_TEMP"             -l "$RUNNER_TEMP/pg.log" -w start; then
+            echo '--- Log del servidor ---'
+            cat "$RUNNER_TEMP/pg.log"
+            exit 1
+          fi
           $PGBIN/createdb prueba
 
       - name: Restaurar y comprobar
