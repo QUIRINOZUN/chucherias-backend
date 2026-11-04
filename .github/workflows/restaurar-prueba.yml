@@ -1,0 +1,121 @@
+# =============================================================================
+# restaurar-prueba.yml — PRUEBA DE RESTAURACIÓN DEL ÚLTIMO RESPALDO
+# =============================================================================
+# Un respaldo que nunca se ha restaurado no es confiable. Este flujo (solo de
+# uso manual: Actions > "Prueba de restauración del respaldo" > Run workflow):
+#   1. Baja el artifact del último respaldo semanal que terminó bien.
+#   2. Lo descifra con el secreto BACKUP_PASSPHRASE.
+#   3. Levanta un PostgreSQL 18 TEMPORAL dentro del runner (se destruye al
+#      terminar; nunca toca Neon ni producción).
+#   4. Restaura el respaldo ahí y comprueba que las tablas clave traen datos.
+# Si termina en verde, el respaldo se puede restaurar de verdad.
+# =============================================================================
+name: Prueba de restauración del respaldo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  restaurar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PGBIN: /usr/lib/postgresql/18/bin
+      PGPORT: '5433'
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: temporal
+    steps:
+      - name: Verificar el secreto
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          if [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "Falta el secreto BACKUP_PASSPHRASE." >&2
+            exit 1
+          fi
+
+      - name: Instalar PostgreSQL 18
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl ca-certificates gnupg
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-18
+
+      - name: Bajar el último respaldo que terminó bien
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=respaldo-semanal.yml \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$RUN_ID" ]; then
+            echo "No hay ningún respaldo semanal exitoso que restaurar." >&2
+            exit 1
+          fi
+          echo "Respaldo de la ejecución $RUN_ID"
+          mkdir -p descarga
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --dir descarga
+          ls -l descarga
+
+      - name: Descifrar el respaldo
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          ARCHIVO=$(find descarga -name '*.dump.gpg' | head -1)
+          echo "Archivo: $ARCHIVO"
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+            --output respaldo.dump --decrypt "$ARCHIVO"
+          ls -l respaldo.dump
+
+      - name: Levantar un PostgreSQL 18 temporal
+        run: |
+          echo "$PGPASSWORD" > pw.txt
+          $PGBIN/initdb -D "$RUNNER_TEMP/pgdata" -U postgres --pwfile=pw.txt -A scram-sha-256 -E UTF8
+          $PGBIN/pg_ctl -D "$RUNNER_TEMP/pgdata" -o "-p $PGPORT -c listen_addresses=127.0.0.1" -l "$RUNNER_TEMP/pg.log" -w start
+          $PGBIN/createdb prueba
+
+      - name: Restaurar y comprobar
+        run: |
+          # pg_restore puede devolver código distinto de 0 por avisos inofensivos
+          # (extensiones o roles de Neon que no existen aquí); lo que decide si
+          # el respaldo sirve es la comprobación de datos de abajo.
+          $PGBIN/pg_restore --no-owner --no-privileges --dbname=prueba respaldo.dump 2>restauracion.log || true
+          echo "Errores reportados por pg_restore: $(grep -c 'error:' restauracion.log || true)"
+          grep 'error:' restauracion.log | head -10 || true
+
+          fallo=0
+          comprobar() { # tabla, mínimo de filas esperado
+            n=$($PGBIN/psql -d prueba -tA -c "SELECT COUNT(*) FROM $1" 2>/dev/null || echo "-1")
+            if [ "$n" -ge "$2" ]; then
+              echo "OK    $1: $n filas (mínimo $2)"
+            else
+              echo "FALLO $1: $n filas (se esperaban al menos $2)"
+              fallo=1
+            fi
+          }
+          comprobar roles 4
+          comprobar usuarios 1
+          comprobar categorias 1
+          comprobar productos 1
+          comprobar variantes_producto 1
+          comprobar recetas 1
+          comprobar receta_insumos 1
+          comprobar insumos 1
+
+          echo "--- Todas las tablas con su número de filas ---"
+          $PGBIN/psql -d prueba -tA -c "SELECT table_name || ': ' || (xpath('/row/c/text()', query_to_xml('SELECT COUNT(*) AS c FROM public.' || quote_ident(table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name" || true
+          exit $fallo
+
+      - name: Apagar y borrar el servidor temporal
+        if: always()
+        run: |
+          $PGBIN/pg_ctl -D "$RUNNER_TEMP/pgdata" -m immediate stop || true
+          rm -rf respaldo.dump descarga pw.txt "$RUNNER_TEMP/pgdata"
