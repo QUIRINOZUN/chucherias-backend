@@ -62,11 +62,13 @@ jobs:
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
           FECHA=$(date -u +%Y-%m-%d)
-          pg_dump "$DATABASE_URL" --format=custom --no-owner --no-privileges --file=respaldo.dump
+          # El runner ya trae el cliente 16 en el PATH: se usa el 18 por su ruta (Neon es PG 18).
+          PGBIN=/usr/lib/postgresql/18/bin
+          $PGBIN/pg_dump "$DATABASE_URL" --format=custom --no-owner --no-privileges --file=respaldo.dump
 
           # Verificación: el archivo debe existir, no estar vacío y poder leerse.
           test -s respaldo.dump
-          TABLAS=$(pg_restore --list respaldo.dump | grep -c "TABLE DATA" || true)
+          TABLAS=$($PGBIN/pg_restore --list respaldo.dump | grep -c "TABLE DATA" || true)
           echo "Tablas con datos en el respaldo: $TABLAS"
           if [ "$TABLAS" -lt 10 ]; then
             echo "El respaldo parece incompleto (menos de 10 tablas con datos)." >&2
