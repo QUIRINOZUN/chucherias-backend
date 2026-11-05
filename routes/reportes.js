@@ -340,6 +340,18 @@ router.get('/resumen', async (req, res) => {
       ),
     ]);
 
+    // Reembolsos de cancelaciones PARCIALES (la venta sigue completada y su
+    // total nunca se reduce): dinero que salió y no es ingreso real.
+    const reembolsosParciales = await pool.query(
+      `SELECT COALESCE(SUM(mc.monto), 0) AS total
+         FROM movimientos_caja mc
+         JOIN ventas v ON v.orden_id = mc.orden_id AND v.estado = 'completada'
+        WHERE mc.tipo = 'reembolso'
+          AND ($1::date IS NULL OR ${diaNegocioSql('v.fecha')} >= $1::date)
+          AND ($2::date IS NULL OR ${diaNegocioSql('v.fecha')} <= $2::date)`,
+      rango,
+    );
+
     res.json({
       periodo: { desde: desde || null, hasta: hasta || null },
       ventas: { ...ventas.rows[0], serie_diaria: serieDiaria.rows },
@@ -358,7 +370,7 @@ router.get('/resumen', async (req, res) => {
         top_clientes: topClientes.rows,
       },
       rentabilidad: (() => {
-        const ingresos = Number(ventas.rows[0].monto_total);
+        const ingresos = Number(ventas.rows[0].monto_total) - Number(reembolsosParciales.rows[0].total);
         const costoVentasReal = Number(costoVentas.rows[0].costo_ventas);
         const utilidadBruta = ingresos - costoVentasReal;
         const costoManoObraReal = Number(costoManoObra.rows[0].costo_mano_obra);
