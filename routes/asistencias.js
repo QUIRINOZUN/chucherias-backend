@@ -398,6 +398,14 @@ router.get('/retardos', async (req, res) => {
        LEFT JOIN horarios h ON h.empleado_id = a.empleado_id
          AND h.dia_semana = (ARRAY['domingo','lunes','martes','miercoles','jueves','viernes','sabado'])[EXTRACT(DOW FROM a.fecha)::int + 1]
        WHERE a.hora_entrada IS NOT NULL
+         -- Solo la PRIMERA entrada del día cuenta para el retardo: un segundo
+         -- turno (doble turno, regreso de un descanso) no se compara contra
+         -- el inicio del horario.
+         AND NOT EXISTS (
+           SELECT 1 FROM asistencias a0
+           WHERE a0.empleado_id = a.empleado_id AND a0.fecha = a.fecha
+             AND a0.hora_entrada IS NOT NULL AND a0.hora_entrada < a.hora_entrada
+         )
          AND ($1::date IS NULL OR a.fecha >= $1::date)
          AND ($2::date IS NULL OR a.fecha <= $2::date)
          AND ($3::int IS NULL OR a.empleado_id = $3::int)
