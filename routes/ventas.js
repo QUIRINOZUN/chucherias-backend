@@ -105,10 +105,22 @@ router.use(verificarToken);
 // `new Date().toISOString()` (UTC), así que después de las 6:00 pm locales
 // el número de orden quedaba con la fecha del día siguiente aunque la venta
 // siguiera siendo del día de hoy en el corte de caja.
-function generarNumeroOrden() {
+// Con solo 9000 sufijos posibles, el sufijo aleatorio choca por la paradoja del
+// cumpleaños (~13% de probabilidad en un día de 50 ventas) y la columna es
+// UNIQUE: la venta fallaba con un 500. Se verifica contra la base y se
+// reintenta; al agotar los intentos se amplía el sufijo a 5 dígitos.
+async function generarNumeroOrden(client) {
   const fecha = fechaHoyNegocio().replace(/-/g, '');
-  const sufijo = Math.floor(1000 + Math.random() * 9000);
-  return `ORD-${fecha}-${sufijo}`;
+  for (let intento = 0; intento < 12; intento++) {
+    const maximo = intento < 8 ? 9000 : 90000;
+    const sufijo = Math.floor((maximo === 9000 ? 1000 : 10000) + Math.random() * maximo);
+    const numero = `ORD-${fecha}-${sufijo}`;
+    const existe = await client.query('SELECT 1 FROM ordenes WHERE numero_orden = $1', [numero]);
+    if (existe.rows.length === 0) {
+      return numero;
+    }
+  }
+  throw new Error('No se pudo generar un número de orden único.');
 }
 
 // POST /api/ventas
@@ -177,7 +189,7 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
       `SELECT vp.id, vp.precio, p.requiere_preparacion
          FROM variantes_producto vp
          JOIN productos p ON p.id = vp.producto_id
-         WHERE vp.id = ANY($1::int[])`,
+         WHERE vp.id = ANY($1::int[]) AND vp.activo = TRUE AND p.activo = TRUE`,
       [varianteIds],
     );
 
@@ -253,7 +265,7 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
-        generarNumeroOrden(),
+        await generarNumeroOrden(client),
         cliente_id || null,
         tipo_entrega,
         estadoInicial,

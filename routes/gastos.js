@@ -160,7 +160,8 @@ router.get('/', async (req, res) => {
 // cercanía temática.
 router.get('/alertas', async (req, res) => {
   try {
-    const resultado = await pool.query(`
+    const resultado = await pool.query(
+      `
       WITH series AS (
         SELECT DISTINCT ON (g.categoria_id, g.concepto)
                g.categoria_id, g.concepto, g.monto, g.dia_pago_mes, g.dias_aviso_previo
@@ -175,9 +176,11 @@ router.get('/alertas', async (req, res) => {
       WHERE NOT EXISTS (
         SELECT 1 FROM gastos g2
         WHERE g2.categoria_id = s.categoria_id AND g2.concepto = s.concepto AND g2.es_recurrente = TRUE
-          AND date_trunc('month', g2.fecha) = date_trunc('month', CURRENT_DATE)
+          AND date_trunc('month', g2.fecha) = date_trunc('month', $1::date)
       )
-    `);
+    `,
+      [fechaHoyNegocio()],
+    );
 
     const hoy = new Date(`${fechaHoyNegocio()}T00:00:00`);
     const anio = hoy.getFullYear();

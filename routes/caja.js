@@ -117,7 +117,7 @@ async function movimientosCajaDelDia(fecha) {
      FROM movimientos_caja mc
      JOIN ventas v ON v.orden_id = mc.orden_id
      WHERE mc.tipo = 'reembolso' AND ${diaNegocioSql('mc.fecha')} = $1
-       AND v.estado = 'completada'
+       AND (v.estado = 'completada' OR ${diaNegocioSql('v.fecha')} <> ${diaNegocioSql('mc.fecha')})
      GROUP BY v.metodo_pago`,
     [fecha],
   );
@@ -346,7 +346,7 @@ router.post('/movimientos', requiereRol(...ROLES_CAJA), async (req, res) => {
   }
 
   const montoNum = Number(monto);
-  if (!montoNum || montoNum <= 0) {
+  if (!Number.isFinite(montoNum) || montoNum <= 0) {
     return res.status(400).json({ error: 'El monto debe ser mayor a cero.' });
   }
   // El retiro es dinero saliendo sin que una venta lo respalde: el motivo es
