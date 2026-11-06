@@ -249,6 +249,20 @@ router.patch('/:id/estado', requiereRol(...ROLES_QUE_AVANZAN), async (req, res) 
     // forma de llegar a 'preparando', esto corre una sola vez por orden.
     if (siguienteEstado === 'preparando') {
       await descontarInventario(client, id, numeroOrden, req.usuario.id);
+
+      // Cocinero automático: quien toca "Empezar a preparar" queda asignado como
+      // el cocinero de esa orden (si su cuenta está ligada a un empleado de
+      // cocina). Así dos auxiliares que preparan platillos distintos a la vez
+      // quedan cada uno con el suyo, sin elegirlo a mano. Un administrador o
+      // encargado sin puesto de cocina no se asigna: el selector manual de
+      // Comandas sigue disponible para ellos.
+      await client.query(
+        `UPDATE ordenes SET cocinero_id = e.id
+           FROM empleados e
+          WHERE ordenes.id = $1 AND ordenes.cocinero_id IS NULL
+            AND e.usuario_id = $2 AND e.activo = TRUE AND e.puesto ILIKE '%cocina%'`,
+        [id, req.usuario.id],
+      );
     }
 
     // RF-08: se cierra el renglón de historial del estado que se deja
