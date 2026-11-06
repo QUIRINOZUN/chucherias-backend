@@ -45,6 +45,7 @@ const { registrarAccion } = require('../utils/bitacora');
 const { diaNegocioSql, fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 
@@ -321,12 +322,12 @@ router.post('/:id/entrada', async (req, res) => {
   const { cantidad, motivo, costo_unitario, proveedor_id } = req.body;
 
   const cantidadNum = Number(cantidad);
-  if (!cantidadNum || cantidadNum <= 0) {
+  if (!Number.isFinite(cantidadNum) || cantidadNum <= 0) {
     return res.status(400).json({ error: 'La cantidad de la entrada debe ser mayor a cero.' });
   }
   if (costo_unitario !== undefined && costo_unitario !== null && costo_unitario !== '') {
     const costoNum = Number(costo_unitario);
-    if (!costoNum || costoNum <= 0) {
+    if (!Number.isFinite(costoNum) || costoNum <= 0) {
       return res.status(400).json({ error: 'El costo de la compra debe ser mayor a cero.' });
     }
   }
@@ -411,7 +412,7 @@ router.post('/:id/ajuste', async (req, res) => {
   const { cantidad, motivo } = req.body;
 
   const cantidadNum = Number(cantidad);
-  if (!cantidadNum || cantidadNum === 0 || Number.isNaN(cantidadNum)) {
+  if (!Number.isFinite(cantidadNum) || cantidadNum === 0) {
     return res.status(400).json({ error: 'La cantidad del ajuste no puede ser cero.' });
   }
   if (!motivo?.trim()) {
@@ -455,7 +456,7 @@ router.post('/:id/merma', async (req, res) => {
   const { cantidad, motivo } = req.body;
 
   const cantidadNum = Number(cantidad);
-  if (!cantidadNum || cantidadNum <= 0) {
+  if (!Number.isFinite(cantidadNum) || cantidadNum <= 0) {
     return res.status(400).json({ error: 'La cantidad de la merma debe ser mayor a cero.' });
   }
   if (!motivo?.trim()) {

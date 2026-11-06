@@ -58,6 +58,7 @@ const { registrarAccion } = require('../utils/bitacora');
 const { fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 const TIPOS_VALIDOS = ['desayuno', 'comida', 'sorpresa', 'otro'];
 const ESTADOS_VALIDOS = ['cotizada', 'confirmada', 'entregada', 'cancelada'];

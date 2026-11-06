@@ -36,11 +36,12 @@
 // fila ahí, es "descanso". El servidor no combina nada, solo guarda/lee
 // cada tabla por separado.
 // =============================================================================
-const express = require("express");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
+const express = require('express');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 // Los 7 días son válidos para un horario recurrente — no hay un día fijo
 // cerrado para todo el negocio (2026-10-12: el calendario del frontend
@@ -49,21 +50,13 @@ const router = express.Router();
 // horario_excepciones). Se valida contra esta lista en vez de solo el CHECK
 // de la base, para dar un mensaje claro en vez de un error 500 si llega un
 // día inválido.
-const DIAS_VALIDOS = [
-  "lunes",
-  "martes",
-  "miercoles",
-  "jueves",
-  "viernes",
-  "sabado",
-  "domingo",
-];
+const DIAS_VALIDOS = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo'];
 
 router.use(verificarToken);
-router.use(requiereRol("administrador", "encargado"));
+router.use(requiereRol('administrador', 'encargado'));
 
 // GET /api/horarios?empleado_id=
-router.get("/", async (req, res) => {
+router.get('/', async (req, res) => {
   const { empleado_id } = req.query;
   try {
     const resultado = await pool.query(
@@ -78,7 +71,7 @@ router.get("/", async (req, res) => {
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener los horarios." });
+    res.status(500).json({ error: 'Error al obtener los horarios.' });
   }
 });
 
@@ -89,7 +82,7 @@ router.get("/", async (req, res) => {
 // tenía horario). Reemplazar completo (en vez de ir día por día) evita
 // tener que sincronizar altas/bajas/ediciones por separado desde un
 // calendario donde se edita la semana entera de una vez.
-router.put("/empleado/:empleadoId", async (req, res) => {
+router.put('/empleado/:empleadoId', async (req, res) => {
   const { empleadoId } = req.params;
   const { dias } = req.body;
 
@@ -99,48 +92,35 @@ router.put("/empleado/:empleadoId", async (req, res) => {
 
   for (const dia of dias) {
     if (!DIAS_VALIDOS.includes(dia.dia_semana)) {
-      return res
-        .status(400)
-        .json({ error: `Día inválido: "${dia.dia_semana}".` });
+      return res.status(400).json({ error: `Día inválido: "${dia.dia_semana}".` });
     }
     if (!dia.hora_entrada || !dia.hora_salida) {
-      return res
-        .status(400)
-        .json({ error: `Faltan horas para "${dia.dia_semana}".` });
+      return res.status(400).json({ error: `Faltan horas para "${dia.dia_semana}".` });
     }
     if (dia.hora_salida <= dia.hora_entrada) {
-      return res
-        .status(400)
-        .json({
-          error: `En "${dia.dia_semana}" la salida debe ser posterior a la entrada.`,
-        });
+      return res.status(400).json({
+        error: `En "${dia.dia_semana}" la salida debe ser posterior a la entrada.`,
+      });
     }
   }
   // Un día no debe repetirse dos veces en la misma lista (el UNIQUE de la
   // base lo impediría de todos modos, pero así se da un mensaje claro).
   const diasRepetidos = dias.map((d) => d.dia_semana);
   if (new Set(diasRepetidos).size !== diasRepetidos.length) {
-    return res
-      .status(400)
-      .json({ error: "No puedes repetir el mismo día dos veces." });
+    return res.status(400).json({ error: 'No puedes repetir el mismo día dos veces.' });
   }
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    const empleado = await client.query(
-      "SELECT id FROM empleados WHERE id = $1",
-      [empleadoId],
-    );
+    const empleado = await client.query('SELECT id FROM empleados WHERE id = $1', [empleadoId]);
     if (empleado.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Empleado no encontrado." });
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Empleado no encontrado.' });
     }
 
-    await client.query("DELETE FROM horarios WHERE empleado_id = $1", [
-      empleadoId,
-    ]);
+    await client.query('DELETE FROM horarios WHERE empleado_id = $1', [empleadoId]);
     for (const dia of dias) {
       await client.query(
         `INSERT INTO horarios (empleado_id, dia_semana, hora_entrada, hora_salida)
@@ -149,7 +129,7 @@ router.put("/empleado/:empleadoId", async (req, res) => {
       );
     }
 
-    await client.query("COMMIT");
+    await client.query('COMMIT');
 
     const resultado = await pool.query(
       `SELECT id, empleado_id, dia_semana, hora_entrada, hora_salida
@@ -158,9 +138,9 @@ router.put("/empleado/:empleadoId", async (req, res) => {
     );
     res.json(resultado.rows);
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query('ROLLBACK');
     console.error(error);
-    res.status(500).json({ error: "Error al guardar el horario." });
+    res.status(500).json({ error: 'Error al guardar el horario.' });
   } finally {
     client.release();
   }
@@ -168,12 +148,12 @@ router.put("/empleado/:empleadoId", async (req, res) => {
 
 // ---- Excepciones de horario por fecha específica (2026-10-08) -------------
 
-const TIPOS_EXCEPCION_VALIDOS = ["trabaja", "descanso", "cerrado"];
+const TIPOS_EXCEPCION_VALIDOS = ['trabaja', 'descanso', 'cerrado'];
 
 // GET /api/horarios/excepciones?empleado_id=&desde=&hasta=
 // `desde`/`hasta` son obligatorios (acotan la consulta al mes/semana que se
 // está viendo); `empleado_id` es opcional.
-router.get("/excepciones", async (req, res) => {
+router.get('/excepciones', async (req, res) => {
   const { empleado_id, desde, hasta } = req.query;
   if (!desde || !hasta) {
     return res.status(400).json({ error: 'Debes indicar "desde" y "hasta".' });
@@ -191,9 +171,7 @@ router.get("/excepciones", async (req, res) => {
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res
-      .status(500)
-      .json({ error: "Error al obtener las excepciones de horario." });
+    res.status(500).json({ error: 'Error al obtener las excepciones de horario.' });
   }
 });
 
@@ -202,39 +180,30 @@ router.get("/excepciones", async (req, res) => {
 // UNIQUE(empleado_id, fecha)). body = { tipo, hora_entrada?, hora_salida? }
 // — las horas solo son obligatorias (y se guardan) cuando tipo = 'trabaja';
 // para 'descanso'/'cerrado' se ignora cualquier hora que llegue.
-router.put("/excepciones/:empleadoId/:fecha", async (req, res) => {
+router.put('/excepciones/:empleadoId/:fecha', async (req, res) => {
   const { empleadoId, fecha } = req.params;
   const { tipo, hora_entrada, hora_salida } = req.body;
 
   if (!TIPOS_EXCEPCION_VALIDOS.includes(tipo)) {
-    return res
-      .status(400)
-      .json({ error: "Tipo inválido (usa trabaja, descanso o cerrado)." });
+    return res.status(400).json({ error: 'Tipo inválido (usa trabaja, descanso o cerrado).' });
   }
-  if (tipo === "trabaja") {
+  if (tipo === 'trabaja') {
     if (!hora_entrada || !hora_salida) {
-      return res
-        .status(400)
-        .json({ error: "Faltan horas para un día de trabajo." });
+      return res.status(400).json({ error: 'Faltan horas para un día de trabajo.' });
     }
     if (hora_salida <= hora_entrada) {
-      return res
-        .status(400)
-        .json({ error: "La salida debe ser posterior a la entrada." });
+      return res.status(400).json({ error: 'La salida debe ser posterior a la entrada.' });
     }
   }
 
   try {
-    const empleado = await pool.query(
-      "SELECT id FROM empleados WHERE id = $1",
-      [empleadoId],
-    );
+    const empleado = await pool.query('SELECT id FROM empleados WHERE id = $1', [empleadoId]);
     if (empleado.rows.length === 0) {
-      return res.status(404).json({ error: "Empleado no encontrado." });
+      return res.status(404).json({ error: 'Empleado no encontrado.' });
     }
 
-    const horaEntradaFinal = tipo === "trabaja" ? hora_entrada : null;
-    const horaSalidaFinal = tipo === "trabaja" ? hora_salida : null;
+    const horaEntradaFinal = tipo === 'trabaja' ? hora_entrada : null;
+    const horaSalidaFinal = tipo === 'trabaja' ? hora_salida : null;
 
     const resultado = await pool.query(
       `INSERT INTO horario_excepciones (empleado_id, fecha, tipo, hora_entrada, hora_salida)
@@ -248,29 +217,27 @@ router.put("/excepciones/:empleadoId/:fecha", async (req, res) => {
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al guardar la excepción." });
+    res.status(500).json({ error: 'Error al guardar la excepción.' });
   }
 });
 
 // DELETE /api/horarios/excepciones/:empleadoId/:fecha
 // Quita la excepción: ese día vuelve a usar el horario normal (o
 // "descanso" si tampoco tiene fila en `horarios` ese día de la semana).
-router.delete("/excepciones/:empleadoId/:fecha", async (req, res) => {
+router.delete('/excepciones/:empleadoId/:fecha', async (req, res) => {
   const { empleadoId, fecha } = req.params;
   try {
     const resultado = await pool.query(
-      "DELETE FROM horario_excepciones WHERE empleado_id = $1 AND fecha = $2 RETURNING id",
+      'DELETE FROM horario_excepciones WHERE empleado_id = $1 AND fecha = $2 RETURNING id',
       [empleadoId, fecha],
     );
     if (resultado.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ error: "Ese día no tenía ninguna excepción." });
+      return res.status(404).json({ error: 'Ese día no tenía ninguna excepción.' });
     }
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al quitar la excepción." });
+    res.status(500).json({ error: 'Error al quitar la excepción.' });
   }
 });
 

@@ -71,6 +71,7 @@ const { subirImagen, borrarImagen } = require('../utils/cloudinary');
 const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 
@@ -321,6 +322,9 @@ router.post('/productos', GESTION, async (req, res) => {
   if (!categoria_id || !nombre?.trim()) {
     return res.status(400).json({ error: 'La categoría y el nombre son obligatorios.' });
   }
+  if (!Number.isInteger(Number(categoria_id))) {
+    return res.status(400).json({ error: 'La categoría indicada no es válida.' });
+  }
   // requiere_preparacion (2026-10-19): TRUE por default si no llega nada —
   // la inmensa mayoría del catálogo SÍ pasa por cocina; solo los productos
   // que de verdad no necesitan preparación (bebidas embotelladas, botanas de
@@ -391,6 +395,9 @@ router.patch('/productos/:id', GESTION, async (req, res) => {
 router.patch('/productos/:id/activo', GESTION, async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body;
+  if (typeof activo !== 'boolean') {
+    return res.status(400).json({ error: 'El campo activo debe ser verdadero o falso.' });
+  }
   try {
     const resultado = await pool.query('UPDATE productos SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo', [
       !!activo,
@@ -522,7 +529,7 @@ router.post('/productos/:productoId/variantes', GESTION, async (req, res) => {
   const { nombre, precio } = req.body;
   const precioNum = Number(precio);
 
-  if (!nombre?.trim() || !Number.isFinite(precioNum) || precioNum <= 0) {
+  if (!nombre?.trim() || !Number.isFinite(precioNum) || precioNum <= 0 || precioNum > 99999) {
     return res.status(400).json({ error: 'El nombre y un precio mayor a cero son obligatorios.' });
   }
   try {
@@ -559,7 +566,7 @@ router.patch('/variantes/:id', GESTION, async (req, res) => {
     let nuevoPrecio = Number(varianteActual.precio);
     if (precio !== undefined) {
       const precioNum = Number(precio);
-      if (!Number.isFinite(precioNum) || precioNum <= 0) {
+      if (!Number.isFinite(precioNum) || precioNum <= 0 || precioNum > 99999) {
         return res.status(400).json({ error: 'El precio debe ser mayor a cero.' });
       }
       nuevoPrecio = precioNum;
@@ -590,6 +597,9 @@ router.patch('/variantes/:id', GESTION, async (req, res) => {
 router.patch('/variantes/:id/activo', GESTION, async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body;
+  if (typeof activo !== 'boolean') {
+    return res.status(400).json({ error: 'El campo activo debe ser verdadero o falso.' });
+  }
   try {
     const resultado = await pool.query(
       'UPDATE variantes_producto SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo',

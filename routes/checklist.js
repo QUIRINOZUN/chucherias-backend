@@ -39,6 +39,7 @@ const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 const ROLES_OPERATIVOS = ['administrador', 'encargado', 'cajero', 'auxiliar'];
 const TIPOS_VALIDOS = ['apertura', 'cierre'];

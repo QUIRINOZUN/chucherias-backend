@@ -39,6 +39,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 const ROLES_EDICION = ['administrador', 'encargado'];
 

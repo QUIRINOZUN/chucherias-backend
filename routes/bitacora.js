@@ -22,6 +22,7 @@ const { verificarToken, requiereRol } = require('../middleware/auth');
 const { diaNegocioSql, fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 router.use(requiereRol('administrador'));

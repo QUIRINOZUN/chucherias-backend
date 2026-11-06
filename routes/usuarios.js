@@ -48,7 +48,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
-const { verificarToken, requiereRol } = require('../middleware/auth');
+const { verificarToken, requiereRol, invalidarCuenta } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio } = require('../utils/fecha');
 
@@ -62,6 +62,7 @@ const PUESTO_POR_ROL = {
 };
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 // Todas las rutas de este archivo requieren estar autenticado.
 router.use(verificarToken);
@@ -109,6 +110,20 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
   if (!nombre || !usuario || !contrasena || !rol_id) {
     return res.status(400).json({ error: 'Todos los campos son obligatorios.' });
   }
+  if (typeof nombre !== 'string' || typeof usuario !== 'string' || typeof contrasena !== 'string') {
+    return res.status(400).json({ error: 'Nombre, usuario y contraseña deben ser texto.' });
+  }
+  if (!nombre.trim() || !usuario.trim() || /\s/.test(usuario.trim())) {
+    return res.status(400).json({ error: 'El usuario no puede estar vacío ni llevar espacios.' });
+  }
+  if (contrasena.length < 6) {
+    return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+  }
+  if (!Number.isInteger(Number(rol_id))) {
+    return res.status(400).json({ error: 'El rol indicado no es válido.' });
+  }
+  const nombreLimpio = nombre.trim();
+  const usuarioLimpio = usuario.trim();
 
   const client = await pool.connect();
   try {
@@ -116,7 +131,7 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
 
     // El nombre de usuario debe ser único: se consulta antes de insertar para
     // dar un mensaje claro (409 Conflict) en vez de un error de la base.
-    const yaExiste = await client.query('SELECT id FROM usuarios WHERE usuario = $1', [usuario]);
+    const yaExiste = await client.query('SELECT id FROM usuarios WHERE usuario = $1', [usuarioLimpio]);
     if (yaExiste.rows.length > 0) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Ese nombre de usuario ya está en uso.' });
@@ -137,7 +152,7 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
       `INSERT INTO usuarios (nombre, usuario, contrasena_hash, rol_id, activo)
        VALUES ($1, $2, $3, $4, TRUE)
        RETURNING id, nombre, usuario, rol_id, activo, fecha_creacion`,
-      [nombre, usuario, contrasenaHash, rol_id],
+      [nombreLimpio, usuarioLimpio, contrasenaHash, rol_id],
     );
     const nuevoUsuario = resultado.rows[0];
 
@@ -148,7 +163,7 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
       await client.query(
         `INSERT INTO empleados (nombre, puesto, fecha_ingreso, usuario_id, activo)
          VALUES ($1, $2, $3, $4, TRUE)`,
-        [nombre, PUESTO_POR_ROL[nombreRol] || nombreRol, fechaHoyNegocio(), nuevoUsuario.id],
+        [nombreLimpio, PUESTO_POR_ROL[nombreRol] || nombreRol, fechaHoyNegocio(), nuevoUsuario.id],
       );
     }
 
@@ -191,7 +206,27 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
     // `?.trim() ||` ignora textos vacíos o solo espacios y cae al valor actual.
     const nuevoNombre = nombre?.trim() || usuarioActual.nombre;
     const nuevoUsuario = usuario?.trim() || usuarioActual.usuario;
-    const nuevoRolId = rol_id || usuarioActual.rol_id;
+    const nuevoRolId = rol_id ? Number(rol_id) : usuarioActual.rol_id;
+
+    if (rol_id) {
+      const rolExiste = Number.isInteger(nuevoRolId)
+        ? await client.query('SELECT id FROM roles WHERE id = $1', [nuevoRolId])
+        : { rows: [] };
+      if (rolExiste.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'El rol indicado no existe.' });
+      }
+    }
+    // Un administrador no puede quitarse a sí mismo el rol: se quedaría sin
+    // acceso a esta misma pantalla (y, si es el único, sin nadie que gestione).
+    if (Number(id) === req.usuario.id && nuevoRolId !== usuarioActual.rol_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'No puedes cambiar tu propio rol.' });
+    }
+    if (contrasena !== undefined && typeof contrasena !== 'string') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'La contraseña debe ser texto.' });
+    }
 
     // Solo si el nombre de usuario cambia se comprueba que nadie MÁS lo tenga
     // (`id != $2` excluye a la propia cuenta que se está editando).
@@ -262,6 +297,7 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
     }
 
     await client.query('COMMIT');
+    invalidarCuenta(id);
     res.json(usuarioActualizado);
   } catch (error) {
     await client.query('ROLLBACK');
@@ -282,6 +318,13 @@ router.patch('/:id/activo', requiereRol('administrador'), async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body; // true o false
 
+  if (typeof activo !== 'boolean') {
+    return res.status(400).json({ error: 'El campo activo debe ser verdadero o falso.' });
+  }
+  if (activo === false && Number(id) === req.usuario.id) {
+    return res.status(400).json({ error: 'No puedes desactivar tu propia cuenta.' });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -299,6 +342,7 @@ router.patch('/:id/activo', requiereRol('administrador'), async (req, res) => {
     await client.query('UPDATE empleados SET activo = $1 WHERE usuario_id = $2', [activo, id]);
 
     await client.query('COMMIT');
+    invalidarCuenta(id);
     res.json(resultado.rows[0]);
   } catch (error) {
     await client.query('ROLLBACK');
@@ -355,6 +399,7 @@ router.delete('/:id', requiereRol('administrador'), async (req, res) => {
       detalle: `${resultado.rows[0].nombre} (@${resultado.rows[0].usuario}).`,
     });
 
+    invalidarCuenta(id);
     res.json({ id: resultado.rows[0].id, eliminado: true });
   } catch (error) {
     await client.query('ROLLBACK');

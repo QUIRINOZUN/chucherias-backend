@@ -173,6 +173,31 @@ app.get('/', (req, res) => {
 });
 
 // Render asigna el puerto por variable de entorno; en local se usa el 3000.
+// Rutas inexistentes y errores no previstos: siempre responden JSON (el
+// frontend espera { error }) y nunca exponen el detalle interno. Express 5
+// manda aquí también las promesas rechazadas de los handlers async.
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Ruta no encontrada.' });
+});
+
+app.use((error, req, res, next) => {
+  if (res.headersSent) {
+    return next(error);
+  }
+  // JSON mal formado o cuerpo demasiado grande: es culpa de la petición, no del servidor.
+  if (error.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'El cuerpo de la petición no es un JSON válido.' });
+  }
+  if (error.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'La petición es demasiado grande.' });
+  }
+  if (typeof error.message === 'string' && error.message.startsWith('Origen no permitido por CORS')) {
+    return res.status(403).json({ error: 'Origen no permitido.' });
+  }
+  console.error(error);
+  res.status(500).json({ error: 'Error interno del servidor.' });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en el puerto ${PORT}`);

@@ -41,6 +41,7 @@ const { registrarAccion } = require('../utils/bitacora');
 const { fechaValida, fechaHoyNegocio } = require('../utils/fecha');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 const FORMAS_PAGO_VALIDAS = ['efectivo', 'transferencia'];
 

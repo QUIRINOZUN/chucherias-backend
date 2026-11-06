@@ -12,6 +12,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 router.use(requiereRol('administrador', 'encargado'));
@@ -19,9 +20,7 @@ router.use(requiereRol('administrador', 'encargado'));
 // GET /api/proveedores
 router.get('/', async (req, res) => {
   try {
-    const resultado = await pool.query(
-      'SELECT id, nombre, contacto, telefono FROM proveedores ORDER BY nombre'
-    );
+    const resultado = await pool.query('SELECT id, nombre, contacto, telefono FROM proveedores ORDER BY nombre');
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
@@ -42,7 +41,7 @@ router.post('/', async (req, res) => {
       `INSERT INTO proveedores (nombre, contacto, telefono)
        VALUES ($1, $2, $3)
        RETURNING id, nombre, contacto, telefono`,
-      [nombre.trim(), contacto?.trim() || null, telefono?.trim() || null]
+      [nombre.trim(), contacto?.trim() || null, telefono?.trim() || null],
     );
     res.status(201).json(resultado.rows[0]);
   } catch (error) {

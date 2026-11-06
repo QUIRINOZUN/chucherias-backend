@@ -27,11 +27,13 @@
 // Devuelve [{ insumo_id, cantidad }] de TODAS las líneas activas (no
 // canceladas) de una orden — lo usa el descuento al pasar a 'preparando'.
 async function calcularInsumosDeOrden(client, ordenId) {
-  const lineas = await client.query(
-    `SELECT id FROM orden_detalle WHERE orden_id = $1 AND cancelado = FALSE`,
-    [ordenId]
+  const lineas = await client.query(`SELECT id FROM orden_detalle WHERE orden_id = $1 AND cancelado = FALSE`, [
+    ordenId,
+  ]);
+  return calcularInsumosDeLineas(
+    client,
+    lineas.rows.map((r) => r.id),
   );
-  return calcularInsumosDeLineas(client, lineas.rows.map((r) => r.id));
 }
 
 // Igual que calcularInsumosDeOrden, pero para un subconjunto EXPLÍCITO de
@@ -49,7 +51,7 @@ async function calcularInsumosDeLineas(client, ordenDetalleIds) {
 
   const lineas = await client.query(
     `SELECT od.id, od.variante_id, od.cantidad FROM orden_detalle od WHERE od.id = ANY($1::int[])`,
-    [ordenDetalleIds]
+    [ordenDetalleIds],
   );
 
   const acumulado = new Map(); // insumo_id -> cantidad total
@@ -67,15 +69,14 @@ async function calcularInsumosDeLineas(client, ordenDetalleIds) {
 
     const quitados = await client.query(
       `SELECT insumo_id FROM orden_detalle_insumos WHERE orden_detalle_id = $1 AND tipo = 'quitado'`,
-      [linea.id]
+      [linea.id],
     );
     const idsQuitados = new Set(quitados.rows.map((r) => r.insumo_id));
 
     // Ingredientes fijos de la receta, salvo los que se quitaron en esta línea.
-    const insumosReceta = await client.query(
-      'SELECT insumo_id, cantidad FROM receta_insumos WHERE receta_id = $1',
-      [recetaId]
-    );
+    const insumosReceta = await client.query('SELECT insumo_id, cantidad FROM receta_insumos WHERE receta_id = $1', [
+      recetaId,
+    ]);
     for (const ri of insumosReceta.rows) {
       if (idsQuitados.has(ri.insumo_id)) {
         continue;
@@ -87,7 +88,7 @@ async function calcularInsumosDeLineas(client, ordenDetalleIds) {
     // elección del POS (pos/producto-elecciones.ts).
     const elegidos = await client.query(
       `SELECT insumo_id, cantidad FROM orden_detalle_insumos WHERE orden_detalle_id = $1 AND tipo = 'elegido'`,
-      [linea.id]
+      [linea.id],
     );
     for (const el of elegidos.rows) {
       sumar(el.insumo_id, Number(el.cantidad) * linea.cantidad);
@@ -103,7 +104,7 @@ async function registrarMovimientosInventario(client, insumos, { tipo, responsab
     await client.query(
       `INSERT INTO movimientos_inventario (insumo_id, tipo, cantidad, responsable_id, motivo, orden_id)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [insumo_id, tipo, cantidad, responsableId, motivo, ordenId]
+      [insumo_id, tipo, cantidad, responsableId, motivo, ordenId],
     );
   }
 }

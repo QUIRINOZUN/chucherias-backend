@@ -96,6 +96,7 @@ const {
 } = require('../utils/inventarioOrden');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 

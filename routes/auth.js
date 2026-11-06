@@ -35,6 +35,7 @@ const { verificarToken } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 // Límite de intentos de login: 10 intentos por IP cada 15 minutos. Es la
 // única ruta pública del sistema (no exige sesión previa), así que es el
@@ -58,7 +59,7 @@ router.post('/login', limitadorLogin, async (req, res) => {
   const { usuario, contrasena } = req.body;
 
   // Validación básica: ambos campos son obligatorios.
-  if (!usuario || !contrasena) {
+  if (typeof usuario !== 'string' || typeof contrasena !== 'string' || !usuario || !contrasena) {
     return res.status(400).json({ error: 'Usuario y contraseña son obligatorios.' });
   }
 

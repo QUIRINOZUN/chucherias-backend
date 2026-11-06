@@ -30,27 +30,26 @@
 // Administrador/encargado — información financiera y de personal (RNF-03),
 // mismo criterio que caja/asistencias/reportes.
 // =============================================================================
-const express = require("express");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
-const { fechaValida } = require("../utils/fecha");
+const express = require('express');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
+const { fechaValida } = require('../utils/fecha');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
-router.use(requiereRol("administrador", "encargado"));
+router.use(requiereRol('administrador', 'encargado'));
 
 // GET /api/nomina?desde=&hasta=&empleado_id=&todos=1
-router.get("/", async (req, res) => {
+router.get('/', async (req, res) => {
   const { desde, hasta, empleado_id, todos } = req.query;
 
   if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
-    return res
-      .status(400)
-      .json({ error: "Las fechas deben tener el formato AAAA-MM-DD." });
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
   }
   if (empleado_id && !/^\d+$/.test(empleado_id)) {
-    return res.status(400).json({ error: "empleado_id debe ser numérico." });
+    return res.status(400).json({ error: 'empleado_id debe ser numérico.' });
   }
 
   try {
@@ -78,7 +77,7 @@ router.get("/", async (req, res) => {
        SELECT *, ROUND(horas_trabajadas * pago_por_hora, 2) AS total_a_pagar
        FROM horas
        ORDER BY nombre`,
-      [desde || null, hasta || null, empleado_id || null, todos === "1"],
+      [desde || null, hasta || null, empleado_id || null, todos === '1'],
     );
     res.json({
       periodo: { desde: desde || null, hasta: hasta || null },
@@ -86,34 +85,26 @@ router.get("/", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al calcular la nómina." });
+    res.status(500).json({ error: 'Error al calcular la nómina.' });
   }
 });
 
 // PATCH /api/nomina/:empleadoId/tarifa
-router.patch("/:empleadoId/tarifa", async (req, res) => {
+router.patch('/:empleadoId/tarifa', async (req, res) => {
   const { empleadoId } = req.params;
   const { pago_por_hora } = req.body;
 
   if (!/^\d+$/.test(empleadoId)) {
-    return res
-      .status(400)
-      .json({ error: "El id del empleado debe ser numérico." });
+    return res.status(400).json({ error: 'El id del empleado debe ser numérico.' });
   }
 
   // null/''/undefined quita la tarifa capturada; cualquier otro valor debe
   // ser un número mayor a cero (nunca 0 ni negativo).
   let nuevaTarifa = null;
-  if (
-    pago_por_hora !== null &&
-    pago_por_hora !== undefined &&
-    pago_por_hora !== ""
-  ) {
+  if (pago_por_hora !== null && pago_por_hora !== undefined && pago_por_hora !== '') {
     nuevaTarifa = Number(pago_por_hora);
     if (!Number.isFinite(nuevaTarifa) || nuevaTarifa <= 0) {
-      return res
-        .status(400)
-        .json({ error: "La tarifa por hora debe ser un número mayor a cero." });
+      return res.status(400).json({ error: 'La tarifa por hora debe ser un número mayor a cero.' });
     }
   }
 
@@ -124,12 +115,12 @@ router.patch("/:empleadoId/tarifa", async (req, res) => {
       [nuevaTarifa, empleadoId],
     );
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Empleado no encontrado." });
+      return res.status(404).json({ error: 'Empleado no encontrado.' });
     }
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al actualizar la tarifa." });
+    res.status(500).json({ error: 'Error al actualizar la tarifa.' });
   }
 });
 

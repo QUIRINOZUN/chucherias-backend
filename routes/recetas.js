@@ -57,13 +57,14 @@
 // unidades al descontar, así que esta ruta no deja elegir una distinta a la
 // del insumo.
 // =============================================================================
-const express = require("express");
-const multer = require("multer");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
-const { subirImagen, borrarImagen } = require("../utils/cloudinary");
+const express = require('express');
+const multer = require('multer');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
+const { subirImagen, borrarImagen } = require('../utils/cloudinary');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 
@@ -73,8 +74,8 @@ const uploadImagen = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith("image/")) {
-      return cb(new Error("El archivo debe ser una imagen."));
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('El archivo debe ser una imagen.'));
     }
     cb(null, true);
   },
@@ -83,19 +84,14 @@ const uploadImagen = multer({
 // GET /api/recetas/variante/:varianteId/imagen — ANTES del requiereRol de
 // abajo, igual que el tutorial: cualquier rol autenticado la puede
 // consultar (es para quien prepara el platillo, no información de gestión).
-router.get("/variante/:varianteId/imagen", async (req, res) => {
+router.get('/variante/:varianteId/imagen', async (req, res) => {
   const { varianteId } = req.params;
   try {
-    const resultado = await pool.query(
-      `SELECT r.imagen_url FROM recetas r WHERE r.variante_id = $1`,
-      [varianteId],
-    );
+    const resultado = await pool.query(`SELECT r.imagen_url FROM recetas r WHERE r.variante_id = $1`, [varianteId]);
     res.json({ imagen_url: resultado.rows[0]?.imagen_url ?? null });
   } catch (error) {
     console.error(error);
-    res
-      .status(500)
-      .json({ error: "Error al obtener la imagen de referencia." });
+    res.status(500).json({ error: 'Error al obtener la imagen de referencia.' });
   }
 });
 
@@ -103,7 +99,7 @@ router.get("/variante/:varianteId/imagen", async (req, res) => {
 // abajo: cualquier rol autenticado puede consultar el tutorial (lo usa
 // Comandas, que ve todo el personal operativo). Editar (PUT) sigue
 // restringido a administrador/encargado, más abajo en el archivo.
-router.get("/variante/:varianteId/tutorial", async (req, res) => {
+router.get('/variante/:varianteId/tutorial', async (req, res) => {
   const { varianteId } = req.params;
   try {
     const resultado = await pool.query(
@@ -117,14 +113,14 @@ router.get("/variante/:varianteId/tutorial", async (req, res) => {
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener el tutorial." });
+    res.status(500).json({ error: 'Error al obtener el tutorial.' });
   }
 });
 
-router.use(requiereRol("administrador", "encargado"));
+router.use(requiereRol('administrador', 'encargado'));
 
 // GET /api/recetas
-router.get("/", async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     // DISTINCT en ambos COUNT: unir receta_insumos Y receta_pasos en la misma
     // consulta multiplica filas (cada insumo × cada paso), así que sin
@@ -170,21 +166,14 @@ router.get("/", async (req, res) => {
     );
     const costoPorReceta = {};
     for (const fila of costos.rows) {
-      costoPorReceta[fila.receta_id] = fila.costo_completo
-        ? Number(fila.costo_receta)
-        : null;
+      costoPorReceta[fila.receta_id] = fila.costo_completo ? Number(fila.costo_receta) : null;
     }
 
     const variantes = resultado.rows.map((fila) => {
-      const costoReceta = fila.receta_id
-        ? (costoPorReceta[fila.receta_id] ?? null)
-        : null;
+      const costoReceta = fila.receta_id ? (costoPorReceta[fila.receta_id] ?? null) : null;
       const precio = Number(fila.precio);
       const margen = costoReceta != null ? precio - costoReceta : null;
-      const margenPorcentaje =
-        costoReceta != null && precio > 0
-          ? Math.round((margen / precio) * 1000) / 10
-          : null;
+      const margenPorcentaje = costoReceta != null && precio > 0 ? Math.round((margen / precio) * 1000) / 10 : null;
       return {
         variante_id: fila.variante_id,
         variante_nombre: fila.variante_nombre,
@@ -220,20 +209,17 @@ router.get("/", async (req, res) => {
     res.json(variantes);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener las variantes." });
+    res.status(500).json({ error: 'Error al obtener las variantes.' });
   }
 });
 
 // GET /api/recetas/variante/:varianteId
-router.get("/variante/:varianteId", async (req, res) => {
+router.get('/variante/:varianteId', async (req, res) => {
   const { varianteId } = req.params;
   try {
-    const variante = await pool.query(
-      "SELECT id FROM variantes_producto WHERE id = $1",
-      [varianteId],
-    );
+    const variante = await pool.query('SELECT id FROM variantes_producto WHERE id = $1', [varianteId]);
     if (variante.rows.length === 0) {
-      return res.status(404).json({ error: "Variante no encontrada." });
+      return res.status(404).json({ error: 'Variante no encontrada.' });
     }
 
     const resultado = await pool.query(
@@ -256,22 +242,18 @@ router.get("/variante/:varianteId", async (req, res) => {
       resultado.rows.map((fila) => ({
         ...fila,
         cantidad: Number(fila.cantidad),
-        costo_unitario:
-          fila.costo_unitario != null ? Number(fila.costo_unitario) : null,
-        costo_linea:
-          fila.costo_unitario != null
-            ? Number(fila.cantidad) * Number(fila.costo_unitario)
-            : null,
+        costo_unitario: fila.costo_unitario != null ? Number(fila.costo_unitario) : null,
+        costo_linea: fila.costo_unitario != null ? Number(fila.cantidad) * Number(fila.costo_unitario) : null,
       })),
     );
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener la receta." });
+    res.status(500).json({ error: 'Error al obtener la receta.' });
   }
 });
 
 // PUT /api/recetas/variante/:varianteId
-router.put("/variante/:varianteId", async (req, res) => {
+router.put('/variante/:varianteId', async (req, res) => {
   const { varianteId } = req.params;
   const { insumos } = req.body;
 
@@ -281,53 +263,36 @@ router.put("/variante/:varianteId", async (req, res) => {
   for (const linea of insumos) {
     const cantidad = Number(linea.cantidad);
     if (!linea.insumo_id || !Number.isFinite(cantidad) || cantidad <= 0) {
-      return res
-        .status(400)
-        .json({ error: "Cada insumo necesita una cantidad mayor a cero." });
+      return res.status(400).json({ error: 'Cada insumo necesita una cantidad mayor a cero.' });
     }
     if (!linea.unidad_medida || !String(linea.unidad_medida).trim()) {
-      return res
-        .status(400)
-        .json({ error: "Falta la unidad de medida de un insumo." });
+      return res.status(400).json({ error: 'Falta la unidad de medida de un insumo.' });
     }
   }
   const idsInsumo = insumos.map((linea) => linea.insumo_id);
   if (new Set(idsInsumo).size !== idsInsumo.length) {
-    return res
-      .status(400)
-      .json({ error: "No puedes repetir el mismo insumo dos veces." });
+    return res.status(400).json({ error: 'No puedes repetir el mismo insumo dos veces.' });
   }
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    const variante = await client.query(
-      "SELECT id FROM variantes_producto WHERE id = $1",
-      [varianteId],
-    );
+    const variante = await client.query('SELECT id FROM variantes_producto WHERE id = $1', [varianteId]);
     if (variante.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Variante no encontrada." });
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Variante no encontrada.' });
     }
 
     if (idsInsumo.length > 0) {
-      const validos = await client.query(
-        "SELECT id FROM insumos WHERE id = ANY($1::int[])",
-        [idsInsumo],
-      );
+      const validos = await client.query('SELECT id FROM insumos WHERE id = ANY($1::int[])', [idsInsumo]);
       if (validos.rows.length !== idsInsumo.length) {
-        await client.query("ROLLBACK");
-        return res
-          .status(400)
-          .json({ error: "Alguno de los insumos no existe." });
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Alguno de los insumos no existe.' });
       }
     }
 
-    let receta = await client.query(
-      "SELECT id FROM recetas WHERE variante_id = $1",
-      [varianteId],
-    );
+    let receta = await client.query('SELECT id FROM recetas WHERE variante_id = $1', [varianteId]);
     let recetaId;
     if (receta.rows.length === 0) {
       const nueva = await client.query(
@@ -340,29 +305,22 @@ router.put("/variante/:varianteId", async (req, res) => {
       recetaId = receta.rows[0].id;
       // RNF-02: "modificación de recetas" debe quedar registrada con quién
       // y cuándo.
-      await client.query(
-        "UPDATE recetas SET editado_por = $1, fecha_edicion = NOW() WHERE id = $2",
-        [req.usuario.id, recetaId],
-      );
+      await client.query('UPDATE recetas SET editado_por = $1, fecha_edicion = NOW() WHERE id = $2', [
+        req.usuario.id,
+        recetaId,
+      ]);
     }
 
-    await client.query("DELETE FROM receta_insumos WHERE receta_id = $1", [
-      recetaId,
-    ]);
+    await client.query('DELETE FROM receta_insumos WHERE receta_id = $1', [recetaId]);
     for (const linea of insumos) {
       await client.query(
         `INSERT INTO receta_insumos (receta_id, insumo_id, cantidad, unidad_medida)
          VALUES ($1, $2, $3, $4)`,
-        [
-          recetaId,
-          linea.insumo_id,
-          Number(linea.cantidad),
-          String(linea.unidad_medida).trim(),
-        ],
+        [recetaId, linea.insumo_id, Number(linea.cantidad), String(linea.unidad_medida).trim()],
       );
     }
 
-    await client.query("COMMIT");
+    await client.query('COMMIT');
 
     const resultado = await pool.query(
       `SELECT ri.id, ri.insumo_id, i.nombre AS insumo_nombre,
@@ -378,18 +336,14 @@ router.put("/variante/:varianteId", async (req, res) => {
       resultado.rows.map((fila) => ({
         ...fila,
         cantidad: Number(fila.cantidad),
-        costo_unitario:
-          fila.costo_unitario != null ? Number(fila.costo_unitario) : null,
-        costo_linea:
-          fila.costo_unitario != null
-            ? Number(fila.cantidad) * Number(fila.costo_unitario)
-            : null,
+        costo_unitario: fila.costo_unitario != null ? Number(fila.costo_unitario) : null,
+        costo_linea: fila.costo_unitario != null ? Number(fila.cantidad) * Number(fila.costo_unitario) : null,
       })),
     );
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query('ROLLBACK');
     console.error(error);
-    res.status(500).json({ error: "Error al guardar la receta." });
+    res.status(500).json({ error: 'Error al guardar la receta.' });
   } finally {
     client.release();
   }
@@ -402,35 +356,29 @@ router.put("/variante/:varianteId", async (req, res) => {
 // receta_pasos y vuelve a insertar solo los recibidos, numerados en el orden
 // en que llegan (1, 2, 3...). Cuerpo: { pasos: ["Primer paso...", "Segundo
 // paso...", ...] } — el orden del arreglo ES el orden de preparación.
-router.put("/variante/:varianteId/tutorial", async (req, res) => {
+router.put('/variante/:varianteId/tutorial', async (req, res) => {
   const { varianteId } = req.params;
   const { pasos } = req.body;
 
   if (!Array.isArray(pasos)) {
     return res.status(400).json({ error: '"pasos" debe ser una lista.' });
   }
-  const descripciones = pasos.map((paso) => String(paso ?? "").trim());
+  const descripciones = pasos.map((paso) => String(paso ?? '').trim());
   if (descripciones.some((descripcion) => !descripcion)) {
-    return res.status(400).json({ error: "Ningún paso puede quedar vacío." });
+    return res.status(400).json({ error: 'Ningún paso puede quedar vacío.' });
   }
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    const variante = await client.query(
-      "SELECT id FROM variantes_producto WHERE id = $1",
-      [varianteId],
-    );
+    const variante = await client.query('SELECT id FROM variantes_producto WHERE id = $1', [varianteId]);
     if (variante.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Variante no encontrada." });
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Variante no encontrada.' });
     }
 
-    let receta = await client.query(
-      "SELECT id FROM recetas WHERE variante_id = $1",
-      [varianteId],
-    );
+    let receta = await client.query('SELECT id FROM recetas WHERE variante_id = $1', [varianteId]);
     let recetaId;
     if (receta.rows.length === 0) {
       const nueva = await client.query(
@@ -443,15 +391,13 @@ router.put("/variante/:varianteId/tutorial", async (req, res) => {
       recetaId = receta.rows[0].id;
       // RNF-02: el tutorial también es parte de la receta — editarlo cuenta
       // como "modificación de recetas".
-      await client.query(
-        "UPDATE recetas SET editado_por = $1, fecha_edicion = NOW() WHERE id = $2",
-        [req.usuario.id, recetaId],
-      );
+      await client.query('UPDATE recetas SET editado_por = $1, fecha_edicion = NOW() WHERE id = $2', [
+        req.usuario.id,
+        recetaId,
+      ]);
     }
 
-    await client.query("DELETE FROM receta_pasos WHERE receta_id = $1", [
-      recetaId,
-    ]);
+    await client.query('DELETE FROM receta_pasos WHERE receta_id = $1', [recetaId]);
     for (let indice = 0; indice < descripciones.length; indice += 1) {
       await client.query(
         `INSERT INTO receta_pasos (receta_id, numero_paso, descripcion)
@@ -460,7 +406,7 @@ router.put("/variante/:varianteId/tutorial", async (req, res) => {
       );
     }
 
-    await client.query("COMMIT");
+    await client.query('COMMIT');
 
     const resultado = await pool.query(
       `SELECT id, numero_paso, descripcion
@@ -471,9 +417,9 @@ router.put("/variante/:varianteId/tutorial", async (req, res) => {
     );
     res.json(resultado.rows);
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query('ROLLBACK');
     console.error(error);
-    res.status(500).json({ error: "Error al guardar el tutorial." });
+    res.status(500).json({ error: 'Error al guardar el tutorial.' });
   } finally {
     client.release();
   }
@@ -485,91 +431,74 @@ router.put("/variante/:varianteId/tutorial", async (req, res) => {
 // falta haber capturado nada más primero). Si ya tenía una foto, la
 // anterior se borra de Cloudinary tras subir la nueva — "mejor esfuerzo":
 // si ese borrado falla no se interrumpe la subida nueva.
-router.post("/variante/:varianteId/imagen", (req, res) => {
-  uploadImagen.single("imagen")(req, res, async (errorMulter) => {
+router.post('/variante/:varianteId/imagen', (req, res) => {
+  uploadImagen.single('imagen')(req, res, async (errorMulter) => {
     if (errorMulter) {
       return res.status(400).json({
-        error: errorMulter.message || "No se pudo procesar el archivo.",
+        error: errorMulter.message || 'No se pudo procesar el archivo.',
       });
     }
     if (!req.file) {
-      return res
-        .status(400)
-        .json({ error: 'Falta el archivo de imagen (campo "imagen").' });
+      return res.status(400).json({ error: 'Falta el archivo de imagen (campo "imagen").' });
     }
 
     const { varianteId } = req.params;
     try {
-      const variante = await pool.query(
-        "SELECT id FROM variantes_producto WHERE id = $1",
-        [varianteId],
-      );
+      const variante = await pool.query('SELECT id FROM variantes_producto WHERE id = $1', [varianteId]);
       if (variante.rows.length === 0) {
-        return res.status(404).json({ error: "Variante no encontrada." });
+        return res.status(404).json({ error: 'Variante no encontrada.' });
       }
 
-      let receta = await pool.query(
-        "SELECT id, imagen_public_id FROM recetas WHERE variante_id = $1",
-        [varianteId],
-      );
+      let receta = await pool.query('SELECT id, imagen_public_id FROM recetas WHERE variante_id = $1', [varianteId]);
       let recetaId;
       let publicIdAnterior = null;
       if (receta.rows.length === 0) {
-        const nueva = await pool.query(
-          "INSERT INTO recetas (variante_id) VALUES ($1) RETURNING id",
-          [varianteId],
-        );
+        const nueva = await pool.query('INSERT INTO recetas (variante_id) VALUES ($1) RETURNING id', [varianteId]);
         recetaId = nueva.rows[0].id;
       } else {
         recetaId = receta.rows[0].id;
         publicIdAnterior = receta.rows[0].imagen_public_id;
       }
 
-      const subida = await subirImagen(req.file.buffer, "chucherias/recetas");
+      const subida = await subirImagen(req.file.buffer, 'chucherias/recetas');
 
       if (publicIdAnterior) {
         await borrarImagen(publicIdAnterior).catch((error) => {
-          console.error(
-            "No se pudo borrar la imagen anterior de Cloudinary:",
-            error,
-          );
+          console.error('No se pudo borrar la imagen anterior de Cloudinary:', error);
         });
       }
 
-      await pool.query(
-        "UPDATE recetas SET imagen_url = $1, imagen_public_id = $2 WHERE id = $3",
-        [subida.secure_url, subida.public_id, recetaId],
-      );
+      await pool.query('UPDATE recetas SET imagen_url = $1, imagen_public_id = $2 WHERE id = $3', [
+        subida.secure_url,
+        subida.public_id,
+        recetaId,
+      ]);
       res.json({ imagen_url: subida.secure_url });
     } catch (error) {
       console.error(error);
-      res.status(500).json({ error: "Error al subir la imagen." });
+      res.status(500).json({ error: 'Error al subir la imagen.' });
     }
   });
 });
 
 // DELETE /api/recetas/variante/:varianteId/imagen
-router.delete("/variante/:varianteId/imagen", async (req, res) => {
+router.delete('/variante/:varianteId/imagen', async (req, res) => {
   const { varianteId } = req.params;
   try {
-    const receta = await pool.query(
-      "SELECT id, imagen_public_id FROM recetas WHERE variante_id = $1",
-      [varianteId],
-    );
+    const receta = await pool.query('SELECT id, imagen_public_id FROM recetas WHERE variante_id = $1', [varianteId]);
     if (receta.rows.length === 0 || !receta.rows[0].imagen_public_id) {
       return res.json({ imagen_url: null });
     }
     await borrarImagen(receta.rows[0].imagen_public_id).catch((error) => {
-      console.error("No se pudo borrar la imagen de Cloudinary:", error);
+      console.error('No se pudo borrar la imagen de Cloudinary:', error);
     });
-    await pool.query(
-      "UPDATE recetas SET imagen_url = NULL, imagen_public_id = NULL WHERE id = $1",
-      [receta.rows[0].id],
-    );
+    await pool.query('UPDATE recetas SET imagen_url = NULL, imagen_public_id = NULL WHERE id = $1', [
+      receta.rows[0].id,
+    ]);
     res.json({ imagen_url: null });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al quitar la imagen." });
+    res.status(500).json({ error: 'Error al quitar la imagen.' });
   }
 });
 

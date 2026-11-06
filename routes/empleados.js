@@ -18,11 +18,12 @@
 // entrar al sistema (un repartidor, por ejemplo). `usuario_id` es opcional y
 // solo liga al empleado con su cuenta cuando la tiene.
 // =============================================================================
-const express = require("express");
-const pool = require("../db");
-const { verificarToken, requiereRol } = require("../middleware/auth");
+const express = require('express');
+const pool = require('../db');
+const { verificarToken, requiereRol } = require('../middleware/auth');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 
@@ -32,23 +33,19 @@ router.use(verificarToken);
 // del requiereRol de abajo, a propósito: el cajero necesita esta lista para
 // cobrar, pero NO tiene acceso a la gestión completa de empleados — mismo
 // patrón que /api/clientes/buscar.
-router.get(
-  "/repartidores",
-  requiereRol("administrador", "encargado", "cajero"),
-  async (req, res) => {
-    try {
-      const resultado = await pool.query(
-        `SELECT id, nombre FROM empleados
+router.get('/repartidores', requiereRol('administrador', 'encargado', 'cajero'), async (req, res) => {
+  try {
+    const resultado = await pool.query(
+      `SELECT id, nombre FROM empleados
        WHERE activo = TRUE AND puesto ILIKE '%repartidor%'
        ORDER BY nombre`,
-      );
-      res.json(resultado.rows);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Error al obtener los repartidores." });
-    }
-  },
-);
+    );
+    res.json(resultado.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener los repartidores.' });
+  }
+});
 
 // GET /api/empleados/cocineros
 // Lista ligera (solo id + nombre) de auxiliares de cocina activos, para el
@@ -58,78 +55,63 @@ router.get(
 // propósito: el auxiliar (quien de verdad cocina) necesita esta lista para
 // asignarse una orden, pero no tiene acceso a la gestión completa de
 // empleados — mismo patrón que /repartidores.
-router.get(
-  "/cocineros",
-  requiereRol("administrador", "encargado", "auxiliar"),
-  async (req, res) => {
-    try {
-      const resultado = await pool.query(
-        `SELECT id, nombre FROM empleados
+router.get('/cocineros', requiereRol('administrador', 'encargado', 'auxiliar'), async (req, res) => {
+  try {
+    const resultado = await pool.query(
+      `SELECT id, nombre FROM empleados
        WHERE activo = TRUE AND puesto ILIKE '%cocina%'
        ORDER BY nombre`,
-      );
-      res.json(resultado.rows);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Error al obtener los cocineros." });
-    }
-  },
-);
+    );
+    res.json(resultado.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener los cocineros.' });
+  }
+});
 
-router.use(requiereRol("administrador", "encargado"));
+router.use(requiereRol('administrador', 'encargado'));
 
 // GET /api/empleados?todos=1
 // Por default solo los activos (para los selectores de "marcar asistencia" y
 // de alta); ?todos=1 trae también a los desactivados (para la pantalla de
 // gestión, donde hace falta poder reactivarlos).
-router.get("/", async (req, res) => {
-  const incluirInactivos = req.query.todos === "1";
+router.get('/', async (req, res) => {
+  const incluirInactivos = req.query.todos === '1';
   try {
     const resultado = await pool.query(
       `SELECT e.id, e.nombre, e.puesto, to_char(e.fecha_ingreso, 'YYYY-MM-DD') AS fecha_ingreso,
               e.activo, e.usuario_id, u.usuario AS usuario_login
        FROM empleados e
        LEFT JOIN usuarios u ON u.id = e.usuario_id
-       ${incluirInactivos ? "" : "WHERE e.activo = TRUE"}
+       ${incluirInactivos ? '' : 'WHERE e.activo = TRUE'}
        ORDER BY e.nombre`,
     );
     res.json(resultado.rows);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al obtener los empleados." });
+    res.status(500).json({ error: 'Error al obtener los empleados.' });
   }
 });
 
 // POST /api/empleados
-router.post("/", async (req, res) => {
+router.post('/', async (req, res) => {
   const { nombre, puesto, fecha_ingreso, usuario_id } = req.body;
 
   if (!nombre?.trim() || !puesto?.trim() || !fecha_ingreso) {
-    return res
-      .status(400)
-      .json({ error: "Nombre, puesto y fecha de ingreso son obligatorios." });
+    return res.status(400).json({ error: 'Nombre, puesto y fecha de ingreso son obligatorios.' });
   }
 
   try {
     // usuario_id es opcional, pero si se manda debe ser una cuenta real y
     // ningún otro empleado puede estar ligado a ella ya (UNIQUE en la tabla).
     if (usuario_id) {
-      const cuenta = await pool.query("SELECT id FROM usuarios WHERE id = $1", [
-        usuario_id,
-      ]);
+      const cuenta = await pool.query('SELECT id FROM usuarios WHERE id = $1', [usuario_id]);
       if (cuenta.rows.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "La cuenta de usuario indicada no existe." });
+        return res.status(400).json({ error: 'La cuenta de usuario indicada no existe.' });
       }
-      const yaLigado = await pool.query(
-        "SELECT id FROM empleados WHERE usuario_id = $1",
-        [usuario_id],
-      );
+      const yaLigado = await pool.query('SELECT id FROM empleados WHERE usuario_id = $1', [usuario_id]);
       if (yaLigado.rows.length > 0) {
-        return res
-          .status(409)
-          .json({ error: "Esa cuenta ya está ligada a otro empleado." });
+        return res.status(409).json({ error: 'Esa cuenta ya está ligada a otro empleado.' });
       }
     }
 
@@ -149,22 +131,20 @@ router.post("/", async (req, res) => {
     res.status(201).json(fila.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al crear el empleado." });
+    res.status(500).json({ error: 'Error al crear el empleado.' });
   }
 });
 
 // PATCH /api/empleados/:id
 // Edición parcial: cada campo que no llegue conserva su valor actual.
-router.patch("/:id", async (req, res) => {
+router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   const { nombre, puesto, fecha_ingreso, usuario_id } = req.body;
 
   try {
-    const actual = await pool.query("SELECT * FROM empleados WHERE id = $1", [
-      id,
-    ]);
+    const actual = await pool.query('SELECT * FROM empleados WHERE id = $1', [id]);
     if (actual.rows.length === 0) {
-      return res.status(404).json({ error: "Empleado no encontrado." });
+      return res.status(404).json({ error: 'Empleado no encontrado.' });
     }
     const empleadoActual = actual.rows[0];
 
@@ -177,14 +157,12 @@ router.patch("/:id", async (req, res) => {
     if (usuario_id !== undefined) {
       nuevoUsuarioId = usuario_id || null;
       if (nuevoUsuarioId) {
-        const yaLigado = await pool.query(
-          "SELECT id FROM empleados WHERE usuario_id = $1 AND id != $2",
-          [nuevoUsuarioId, id],
-        );
+        const yaLigado = await pool.query('SELECT id FROM empleados WHERE usuario_id = $1 AND id != $2', [
+          nuevoUsuarioId,
+          id,
+        ]);
         if (yaLigado.rows.length > 0) {
-          return res
-            .status(409)
-            .json({ error: "Esa cuenta ya está ligada a otro empleado." });
+          return res.status(409).json({ error: 'Esa cuenta ya está ligada a otro empleado.' });
         }
       }
     }
@@ -202,29 +180,29 @@ router.patch("/:id", async (req, res) => {
     res.json(fila.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al actualizar el empleado." });
+    res.status(500).json({ error: 'Error al actualizar el empleado.' });
   }
 });
 
 // PATCH /api/empleados/:id/activo
 // Nunca se borra un empleado (su historial de asistencias quedaría huérfano):
 // se desactiva, igual que las cuentas de usuarios.
-router.patch("/:id/activo", async (req, res) => {
+router.patch('/:id/activo', async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body;
 
   try {
-    const resultado = await pool.query(
-      "UPDATE empleados SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo",
-      [activo, id],
-    );
+    const resultado = await pool.query('UPDATE empleados SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo', [
+      activo,
+      id,
+    ]);
     if (resultado.rows.length === 0) {
-      return res.status(404).json({ error: "Empleado no encontrado." });
+      return res.status(404).json({ error: 'Empleado no encontrado.' });
     }
     res.json(resultado.rows[0]);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error al actualizar el empleado." });
+    res.status(500).json({ error: 'Error al actualizar el empleado.' });
   }
 });
 

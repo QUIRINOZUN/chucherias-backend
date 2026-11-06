@@ -17,37 +17,62 @@
 // estas funciones impiden de verdad que alguien llame a la API directamente.
 // =============================================================================
 const jwt = require('jsonwebtoken');
+const pool = require('../db');
 
 // Verifica que la petición traiga un token válido en el header:
 // Authorization: Bearer <token>
-function verificarToken(req, res, next) {
+// Un JWT dura 8 h, pero la cuenta puede desactivarse, borrarse o cambiar de rol
+// en ese lapso. Sin revisar la base, un token viejo seguiría dando acceso (y
+// con el rol anterior). Se consulta el estado actual de la cuenta y se guarda
+// 30 s en memoria para no pegarle a la base en cada petición.
+const TTL_CUENTA_MS = 30 * 1000;
+const cacheCuentas = new Map();
+
+async function estadoDeCuenta(id) {
+  const ahora = Date.now();
+  const guardado = cacheCuentas.get(id);
+  if (guardado && ahora - guardado.ts < TTL_CUENTA_MS) {
+    return guardado.cuenta;
+  }
+  const resultado = await pool.query(
+    'SELECT u.activo, r.nombre AS rol FROM usuarios u JOIN roles r ON r.id = u.rol_id WHERE u.id = $1',
+    [id],
+  );
+  const cuenta = resultado.rows[0] || null;
+  cacheCuentas.set(id, { cuenta, ts: ahora });
+  return cuenta;
+}
+
+async function verificarToken(req, res, next) {
   const authHeader = req.headers.authorization;
 
-  // Sin header o con un formato distinto a "Bearer <token>": no hay sesión.
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No se proporcionó un token de autenticación.' });
   }
 
-  // "Bearer abc123" → ["Bearer", "abc123"]; nos quedamos con el token.
   const token = authHeader.split(' ')[1];
 
+  let payload;
   try {
-    // jwt.verify comprueba la firma (con JWT_SECRET) y la fecha de expiración.
-    // Si algo falla lanza una excepción y se responde 401.
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    // El payload es lo que se firmó al hacer login. Queda disponible para el
-    // resto de la ruta: req.usuario.id, .usuario, .nombre y .rol.
-    req.usuario = payload; // { id, usuario, nombre, rol }
+    payload = jwt.verify(token, process.env.JWT_SECRET);
+  } catch (error) {
+    return res.status(401).json({ error: 'Token inválido o expirado.' });
+  }
+
+  try {
+    const cuenta = await estadoDeCuenta(payload.id);
+    if (!cuenta || !cuenta.activo) {
+      return res.status(401).json({ error: 'La cuenta ya no está activa. Inicia sesión de nuevo.' });
+    }
+    // El rol vigente en la base manda sobre el que traía el token.
+    req.usuario = { ...payload, rol: cuenta.rol };
     next();
   } catch (error) {
-    // El frontend interpreta este 401 como sesión vencida y cierra la sesión.
-    return res.status(401).json({ error: 'Token inválido o expirado.' });
+    console.error(error);
+    res.status(500).json({ error: 'Error al verificar la sesión.' });
   }
 }
 
-// Restringe una ruta a ciertos roles.
-// Uso: requiereRol('administrador', 'encargado')
-// Debe ir DESPUÉS de verificarToken, porque lee req.usuario.rol.
 function requiereRol(...rolesPermitidos) {
   // Devuelve el middleware ya "configurado" con la lista de roles permitidos.
   return (req, res, next) => {
@@ -62,4 +87,10 @@ function requiereRol(...rolesPermitidos) {
   };
 }
 
-module.exports = { verificarToken, requiereRol };
+// Para que una desactivación o un cambio de rol surta efecto de inmediato en
+// este mismo proceso, sin esperar a que caduque el caché de 30 s.
+function invalidarCuenta(id) {
+  cacheCuentas.delete(Number(id));
+}
+
+module.exports = { verificarToken, requiereRol, invalidarCuenta };

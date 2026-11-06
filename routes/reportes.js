@@ -60,6 +60,7 @@ const { diaNegocioSql, fechaValida } = require('../utils/fecha');
 const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
 
 const router = express.Router();
+require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 router.use(requiereRol('administrador', 'encargado'));
