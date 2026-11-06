@@ -104,7 +104,7 @@ const ROLES_QUE_AVANZAN = ['administrador', 'encargado', 'auxiliar'];
 const ROLES_QUE_ASIGNAN_REPARTIDOR = ['administrador', 'encargado', 'cajero'];
 // Asignar cocinero SÍ es una decisión de cocina (quién está trabajando qué
 // orden) — mismos roles que avanzan comandas.
-const ROLES_QUE_ASIGNAN_COCINERO = ['administrador', 'encargado', 'auxiliar'];
+const ROLES_QUE_ASIGNAN_COCINERO = ['administrador', 'encargado'];
 
 // El flujo de una comanda avanza en un solo sentido; 'cancelada' se maneja
 // aparte, a través de la cancelación de la venta.
