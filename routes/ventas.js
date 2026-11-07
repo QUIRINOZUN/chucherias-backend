@@ -100,28 +100,21 @@ require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
 
-// Genera un número de orden único y legible: ORD-<fecha>-<sufijo aleatorio>
-// Ejemplo: ORD-20260926-4821. La fecha es el día del negocio en hora de
-// Durango (fechaHoyNegocio, ver utils/fecha.js) — antes usaba
-// `new Date().toISOString()` (UTC), así que después de las 6:00 pm locales
-// el número de orden quedaba con la fecha del día siguiente aunque la venta
-// siguiera siendo del día de hoy en el corte de caja.
-// Con solo 9000 sufijos posibles, el sufijo aleatorio choca por la paradoja del
-// cumpleaños (~13% de probabilidad en un día de 50 ventas) y la columna es
-// UNIQUE: la venta fallaba con un 500. Se verifica contra la base y se
-// reintenta; al agotar los intentos se amplía el sufijo a 5 dígitos.
+// Genera el folio consecutivo del día: ORD-<fecha>-0001, 0002, ... La fecha es
+// el día del negocio en hora de Durango (fechaHoyNegocio, utils/fecha.js).
+// Se toma un candado de transacción para que dos ventas simultáneas no
+// obtengan el mismo número; el siguiente es el mayor del día + 1 (si el día
+// pasa de 9999 ventas el número simplemente crece a 5 dígitos).
 async function generarNumeroOrden(client) {
   const fecha = fechaHoyNegocio().replace(/-/g, '');
-  for (let intento = 0; intento < 12; intento++) {
-    const maximo = intento < 8 ? 9000 : 90000;
-    const sufijo = Math.floor((maximo === 9000 ? 1000 : 10000) + Math.random() * maximo);
-    const numero = `ORD-${fecha}-${sufijo}`;
-    const existe = await client.query('SELECT 1 FROM ordenes WHERE numero_orden = $1', [numero]);
-    if (existe.rows.length === 0) {
-      return numero;
-    }
-  }
-  throw new Error('No se pudo generar un número de orden único.');
+  const prefijo = `ORD-${fecha}-`;
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [prefijo]);
+  const r = await client.query(
+    `SELECT COALESCE(MAX(SUBSTRING(numero_orden FROM '[0-9]+$')::int), 0) AS maximo
+     FROM ordenes WHERE numero_orden LIKE $1 AND numero_orden ~ '^ORD-[0-9]{8}-[0-9]+$'`,
+    [prefijo + '%'],
+  );
+  return prefijo + String(r.rows[0].maximo + 1).padStart(4, '0');
 }
 
 // POST /api/ventas
