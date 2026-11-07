@@ -31,7 +31,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const pool = require('../db');
-const { verificarToken } = require('../middleware/auth');
+const { verificarToken, invalidarCuenta } = require('../middleware/auth');
+const { errorContrasena } = require('../utils/validar');
 const { registrarAccion } = require('../utils/bitacora');
 
 const router = express.Router();
@@ -127,6 +128,50 @@ router.post('/login', limitadorLogin, async (req, res) => {
 // Devuelve los datos del usuario actualmente autenticado (según su token).
 router.get('/me', verificarToken, (req, res) => {
   res.json({ usuario: req.usuario });
+});
+
+// PATCH /api/auth/contrasena
+// Cada persona cambia SU PROPIA contraseña (cualquier rol): exige la actual,
+// así que alguien con la sesión abierta en un equipo ajeno no puede
+// cambiarla sin conocerla. Mismo límite de intentos que el login, porque
+// también sirve para probar contraseñas actuales.
+router.patch('/contrasena', verificarToken, limitadorLogin, async (req, res) => {
+  const { contrasena_actual: actual, contrasena_nueva: nueva } = req.body;
+
+  if (typeof actual !== 'string' || typeof nueva !== 'string' || !actual || !nueva) {
+    return res.status(400).json({ error: 'Debes indicar la contraseña actual y la nueva.' });
+  }
+  const errorClave = errorContrasena(nueva, req.usuario.usuario);
+  if (errorClave) {
+    return res.status(400).json({ error: errorClave });
+  }
+  if (actual === nueva) {
+    return res.status(400).json({ error: 'La contraseña nueva debe ser distinta de la actual.' });
+  }
+
+  try {
+    const fila = await pool.query('SELECT contrasena_hash FROM usuarios WHERE id = $1', [req.usuario.id]);
+    if (fila.rows.length === 0) {
+      return res.status(404).json({ error: 'Cuenta no encontrada.' });
+    }
+    if (!(await bcrypt.compare(actual, fila.rows[0].contrasena_hash))) {
+      return res.status(401).json({ error: 'La contraseña actual no es correcta.' });
+    }
+    const hash = await bcrypt.hash(nueva, 10);
+    await pool.query('UPDATE usuarios SET contrasena_hash = $1 WHERE id = $2', [hash, req.usuario.id]);
+    invalidarCuenta(req.usuario.id);
+
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'cambio_contrasena',
+      detalle: 'Cambió su propia contraseña.',
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al cambiar la contraseña.' });
+  }
 });
 
 module.exports = router;

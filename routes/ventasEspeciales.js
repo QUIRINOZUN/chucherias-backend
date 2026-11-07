@@ -56,6 +56,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaValida } = require('../utils/fecha');
+const { horaValida } = require('../utils/validar');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -226,6 +227,9 @@ router.post('/', async (req, res) => {
   if (!cliente_nombre?.trim()) {
     return res.status(400).json({ error: 'El nombre del cliente es obligatorio.' });
   }
+  if (hora_evento && !horaValida(hora_evento)) {
+    return res.status(400).json({ error: 'La hora del evento debe tener el formato HH:MM.' });
+  }
   if (!fecha_evento || !fechaValida(fecha_evento)) {
     return res.status(400).json({ error: 'La fecha del evento debe tener el formato AAAA-MM-DD.' });
   }
@@ -326,6 +330,9 @@ router.patch('/:id', async (req, res) => {
         status: 400,
         mensaje: `El estado debe ser uno de: ${ESTADOS_VALIDOS.join(', ')}.`,
       };
+    }
+    if (body.hora_evento && !horaValida(body.hora_evento)) {
+      throw { status: 400, mensaje: 'La hora del evento debe tener el formato HH:MM.' };
     }
     if (body.fecha_evento !== undefined && !fechaValida(body.fecha_evento)) {
       throw {

@@ -62,6 +62,7 @@ const multer = require('multer');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { subirImagen, borrarImagen } = require('../utils/cloudinary');
+const { enteroPositivo } = require('../utils/validar');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -260,13 +261,22 @@ router.put('/variante/:varianteId', async (req, res) => {
   if (!Array.isArray(insumos)) {
     return res.status(400).json({ error: '"insumos" debe ser una lista.' });
   }
+  if (insumos.length > 100) {
+    return res.status(400).json({ error: 'Una receta no puede tener más de 100 insumos.' });
+  }
   for (const linea of insumos) {
-    const cantidad = Number(linea.cantidad);
-    if (!linea.insumo_id || !Number.isFinite(cantidad) || cantidad <= 0) {
-      return res.status(400).json({ error: 'Cada insumo necesita una cantidad mayor a cero.' });
+    if (!linea || typeof linea !== 'object') {
+      return res.status(400).json({ error: 'Cada insumo debe ser un objeto con insumo_id y cantidad.' });
     }
-    if (!linea.unidad_medida || !String(linea.unidad_medida).trim()) {
+    const cantidad = Number(linea.cantidad);
+    if (!enteroPositivo(linea.insumo_id) || !Number.isFinite(cantidad) || cantidad <= 0 || cantidad > 99999999) {
+      return res.status(400).json({ error: 'Cada insumo necesita un id válido y una cantidad mayor a cero.' });
+    }
+    if (!linea.unidad_medida || typeof linea.unidad_medida !== 'string' || !linea.unidad_medida.trim()) {
       return res.status(400).json({ error: 'Falta la unidad de medida de un insumo.' });
+    }
+    if (linea.unidad_medida.trim().length > 20) {
+      return res.status(400).json({ error: 'La unidad de medida es demasiado larga.' });
     }
   }
   const idsInsumo = insumos.map((linea) => linea.insumo_id);
@@ -363,7 +373,13 @@ router.put('/variante/:varianteId/tutorial', async (req, res) => {
   if (!Array.isArray(pasos)) {
     return res.status(400).json({ error: '"pasos" debe ser una lista.' });
   }
-  const descripciones = pasos.map((paso) => String(paso ?? '').trim());
+  if (pasos.length > 60 || pasos.some((paso) => typeof paso !== 'string')) {
+    return res.status(400).json({ error: 'Los pasos deben ser texto (máximo 60).' });
+  }
+  const descripciones = pasos.map((paso) => paso.trim());
+  if (descripciones.some((descripcion) => descripcion.length > 1000)) {
+    return res.status(400).json({ error: 'Un paso no puede pasar de 1000 caracteres.' });
+  }
   if (descripciones.some((descripcion) => !descripcion)) {
     return res.status(400).json({ error: 'Ningún paso puede quedar vacío.' });
   }

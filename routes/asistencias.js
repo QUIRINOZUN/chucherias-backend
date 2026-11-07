@@ -55,6 +55,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, horaAhoraNegocioSql, fechaValida } = require('../utils/fecha');
+const { horaValida, enteroPositivo } = require('../utils/validar');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -223,8 +224,14 @@ router.post('/', async (req, res) => {
   if (!fechaValida(fecha)) {
     return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
   }
+  if ((hora_entrada && !horaValida(hora_entrada)) || (hora_salida && !horaValida(hora_salida))) {
+    return res.status(400).json({ error: 'Las horas deben tener el formato HH:MM.' });
+  }
   if (hora_entrada && hora_salida && hora_salida <= hora_entrada) {
     return res.status(400).json({ error: 'La hora de salida debe ser posterior a la de entrada.' });
+  }
+  if (!enteroPositivo(empleado_id)) {
+    return res.status(400).json({ error: 'empleado_id debe ser numérico.' });
   }
 
   try {
@@ -280,6 +287,10 @@ router.patch('/:id', async (req, res) => {
     if (fecha && !fechaValida(fecha)) {
       client.release();
       return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+    }
+    if ((hora_entrada && !horaValida(hora_entrada)) || (hora_salida && !horaValida(hora_salida))) {
+      client.release();
+      return res.status(400).json({ error: 'Las horas deben tener el formato HH:MM.' });
     }
     const nuevaEntrada = hora_entrada !== undefined ? hora_entrada || null : actualFila.hora_entrada;
     const nuevaSalida = hora_salida !== undefined ? hora_salida || null : actualFila.hora_salida;

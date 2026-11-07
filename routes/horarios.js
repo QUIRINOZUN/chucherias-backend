@@ -39,6 +39,8 @@
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
+const { fechaValida } = require('../utils/fecha');
+const { horaValida, enteroPositivo } = require('../utils/validar');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -58,6 +60,9 @@ router.use(requiereRol('administrador', 'encargado'));
 // GET /api/horarios?empleado_id=
 router.get('/', async (req, res) => {
   const { empleado_id } = req.query;
+  if (empleado_id && !enteroPositivo(empleado_id)) {
+    return res.status(400).json({ error: 'empleado_id debe ser numérico.' });
+  }
   try {
     const resultado = await pool.query(
       `SELECT h.id, h.empleado_id, e.nombre AS empleado_nombre, h.dia_semana,
@@ -91,11 +96,17 @@ router.put('/empleado/:empleadoId', async (req, res) => {
   }
 
   for (const dia of dias) {
+    if (!dia || typeof dia !== 'object') {
+      return res.status(400).json({ error: 'Cada día debe ser un objeto con día y horas.' });
+    }
     if (!DIAS_VALIDOS.includes(dia.dia_semana)) {
       return res.status(400).json({ error: `Día inválido: "${dia.dia_semana}".` });
     }
     if (!dia.hora_entrada || !dia.hora_salida) {
       return res.status(400).json({ error: `Faltan horas para "${dia.dia_semana}".` });
+    }
+    if (!horaValida(dia.hora_entrada) || !horaValida(dia.hora_salida)) {
+      return res.status(400).json({ error: `Las horas de "${dia.dia_semana}" deben tener el formato HH:MM.` });
     }
     if (dia.hora_salida <= dia.hora_entrada) {
       return res.status(400).json({
@@ -158,6 +169,12 @@ router.get('/excepciones', async (req, res) => {
   if (!desde || !hasta) {
     return res.status(400).json({ error: 'Debes indicar "desde" y "hasta".' });
   }
+  if (!fechaValida(desde) || !fechaValida(hasta)) {
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
+  }
+  if (empleado_id && !enteroPositivo(empleado_id)) {
+    return res.status(400).json({ error: 'empleado_id debe ser numérico.' });
+  }
   try {
     const resultado = await pool.query(
       `SELECT id, empleado_id, to_char(fecha, 'YYYY-MM-DD') AS fecha, tipo,
@@ -184,12 +201,19 @@ router.put('/excepciones/:empleadoId/:fecha', async (req, res) => {
   const { empleadoId, fecha } = req.params;
   const { tipo, hora_entrada, hora_salida } = req.body;
 
+  if (!fechaValida(fecha)) {
+    return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+  }
+
   if (!TIPOS_EXCEPCION_VALIDOS.includes(tipo)) {
     return res.status(400).json({ error: 'Tipo inválido (usa trabaja, descanso o cerrado).' });
   }
   if (tipo === 'trabaja') {
     if (!hora_entrada || !hora_salida) {
       return res.status(400).json({ error: 'Faltan horas para un día de trabajo.' });
+    }
+    if (!horaValida(hora_entrada) || !horaValida(hora_salida)) {
+      return res.status(400).json({ error: 'Las horas deben tener el formato HH:MM.' });
     }
     if (hora_salida <= hora_entrada) {
       return res.status(400).json({ error: 'La salida debe ser posterior a la entrada.' });
@@ -226,6 +250,9 @@ router.put('/excepciones/:empleadoId/:fecha', async (req, res) => {
 // "descanso" si tampoco tiene fila en `horarios` ese día de la semana).
 router.delete('/excepciones/:empleadoId/:fecha', async (req, res) => {
   const { empleadoId, fecha } = req.params;
+  if (!fechaValida(fecha)) {
+    return res.status(400).json({ error: 'La fecha debe tener el formato AAAA-MM-DD.' });
+  }
   try {
     const resultado = await pool.query(
       'DELETE FROM horario_excepciones WHERE empleado_id = $1 AND fecha = $2 RETURNING id',

@@ -34,6 +34,7 @@ const ACCIONES_VALIDAS = [
   'cancelar_venta',
   'retiro_caja',
   'eliminar_venta_especial',
+  'cambio_contrasena',
 ];
 
 function idValido(id) {

@@ -46,6 +46,7 @@
 //     historial directo.
 // =============================================================================
 const express = require('express');
+const { errorContrasena } = require('../utils/validar');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const { verificarToken, requiereRol, invalidarCuenta } = require('../middleware/auth');
@@ -116,8 +117,9 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
   if (!nombre.trim() || !usuario.trim() || /\s/.test(usuario.trim())) {
     return res.status(400).json({ error: 'El usuario no puede estar vacío ni llevar espacios.' });
   }
-  if (contrasena.length < 6) {
-    return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+  const errorClave = errorContrasena(contrasena, usuario.trim());
+  if (errorClave) {
+    return res.status(400).json({ error: errorClave });
   }
   if (!Number.isInteger(Number(rol_id))) {
     return res.status(400).json({ error: 'El rol indicado no es válido.' });
@@ -245,9 +247,10 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
     // contraseña nueva válida (mínimo 6 caracteres).
     let nuevoHash = usuarioActual.contrasena_hash;
     if (contrasena) {
-      if (contrasena.length < 6) {
+      const errorClave = errorContrasena(contrasena, usuario);
+      if (errorClave) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+        return res.status(400).json({ error: errorClave });
       }
       nuevoHash = await bcrypt.hash(contrasena, 10);
     }

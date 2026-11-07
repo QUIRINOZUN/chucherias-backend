@@ -21,6 +21,8 @@
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
+const { fechaValida } = require('../utils/fecha');
+const { enteroPositivo } = require('../utils/validar');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -97,8 +99,14 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   const { nombre, puesto, fecha_ingreso, usuario_id } = req.body;
 
-  if (!nombre?.trim() || !puesto?.trim() || !fecha_ingreso) {
+  if (typeof nombre !== 'string' || typeof puesto !== 'string' || !nombre.trim() || !puesto.trim() || !fecha_ingreso) {
     return res.status(400).json({ error: 'Nombre, puesto y fecha de ingreso son obligatorios.' });
+  }
+  if (!fechaValida(fecha_ingreso)) {
+    return res.status(400).json({ error: 'La fecha de ingreso debe tener el formato AAAA-MM-DD.' });
+  }
+  if (usuario_id && !enteroPositivo(usuario_id)) {
+    return res.status(400).json({ error: 'La cuenta de usuario indicada no es válida.' });
   }
 
   try {
@@ -140,6 +148,15 @@ router.post('/', async (req, res) => {
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   const { nombre, puesto, fecha_ingreso, usuario_id } = req.body;
+
+  if (
+    (nombre !== undefined && typeof nombre !== 'string') ||
+    (puesto !== undefined && typeof puesto !== 'string') ||
+    (fecha_ingreso && !fechaValida(fecha_ingreso)) ||
+    (usuario_id && !enteroPositivo(usuario_id))
+  ) {
+    return res.status(400).json({ error: 'Alguno de los datos enviados no es válido.' });
+  }
 
   try {
     const actual = await pool.query('SELECT * FROM empleados WHERE id = $1', [id]);
@@ -190,6 +207,10 @@ router.patch('/:id', async (req, res) => {
 router.patch('/:id/activo', async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body;
+
+  if (typeof activo !== 'boolean') {
+    return res.status(400).json({ error: '"activo" debe ser verdadero o falso.' });
+  }
 
   try {
     const resultado = await pool.query('UPDATE empleados SET activo = $1 WHERE id = $2 RETURNING id, nombre, activo', [
