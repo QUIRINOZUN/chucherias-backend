@@ -95,10 +95,74 @@ const {
   registrarMovimientosInventario,
 } = require('../utils/inventarioOrden');
 
+// Cargo por transporte de un pedido a domicilio (pedido de la dueña, 2026-11-10). Editable por
+// el administrador (config_negocio); el valor por defecto es $25. SIEMPRE lo decide el servidor.
+const TARIFA_ENVIO_POR_DEFECTO = 25;
+async function tarifaEnvioVigente() {
+  try {
+    const r = await pool.query('SELECT tarifa_envio_domicilio FROM config_negocio WHERE id = 1');
+    return r.rows.length ? Number(r.rows[0].tarifa_envio_domicilio) : TARIFA_ENVIO_POR_DEFECTO;
+  } catch {
+    return TARIFA_ENVIO_POR_DEFECTO;
+  }
+}
+
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
 
 router.use(verificarToken);
+
+// GET /api/ventas/envios/tarifa — tarifa vigente (la necesita el POS para mostrar el total).
+router.get('/envios/tarifa', requiereRol('administrador', 'encargado', 'cajero'), async (req, res) => {
+  res.json({ tarifa: await tarifaEnvioVigente() });
+});
+
+// PATCH /api/ventas/envios/tarifa { tarifa } — solo administrador. Aplica a ventas nuevas.
+router.patch('/envios/tarifa', requiereRol('administrador'), async (req, res) => {
+  const tarifa = Number(req.body.tarifa);
+  if (req.body.tarifa === '' || req.body.tarifa == null || !Number.isFinite(tarifa) || tarifa < 0 || tarifa > 9999) {
+    return res.status(400).json({ error: 'La tarifa debe ser un número entre 0 y 9999.' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO config_negocio (id, tarifa_envio_domicilio) VALUES (1, $1)
+       ON CONFLICT (id) DO UPDATE SET tarifa_envio_domicilio = EXCLUDED.tarifa_envio_domicilio`,
+      [Math.round(tarifa * 100) / 100],
+    );
+    res.json({ tarifa: Math.round(tarifa * 100) / 100 });
+  } catch (error) {
+    console.error('Error al guardar la tarifa de envío:', error);
+    res.status(500).json({ error: 'No se pudo guardar la tarifa de envío.' });
+  }
+});
+
+// GET /api/ventas/envios?desde=&hasta= — cuánto se le debe a cada repartidor por los
+// cargos de envío cobrados (solo ventas completadas a domicilio). Pensado para el pago semanal.
+router.get('/envios', requiereRol('administrador', 'encargado'), async (req, res) => {
+  const { desde, hasta } = req.query;
+  if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
+    return res.status(400).json({ error: 'Las fechas deben tener formato AAAA-MM-DD.' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT o.repartidor_id, e.nombre AS repartidor, COUNT(*)::int AS envios,
+              COALESCE(SUM(v.cargo_envio), 0) AS total
+       FROM ventas v
+       JOIN ordenes o ON o.id = v.orden_id
+       LEFT JOIN empleados e ON e.id = o.repartidor_id
+       WHERE v.estado = 'completada' AND o.tipo_entrega = 'domicilio' AND v.cargo_envio > 0
+         AND ($1::date IS NULL OR ${diaNegocioSql('v.fecha')} >= $1::date)
+         AND ($2::date IS NULL OR ${diaNegocioSql('v.fecha')} <= $2::date)
+       GROUP BY o.repartidor_id, e.nombre
+       ORDER BY e.nombre NULLS LAST`,
+      [desde || null, hasta || null],
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Error al consultar envíos:', error);
+    res.status(500).json({ error: 'Error al consultar los envíos a domicilio.' });
+  }
+});
 
 // Genera el folio consecutivo del día: ORD-<fecha>-0001, 0002, ... La fecha es
 // el día del negocio en hora de Durango (fechaHoyNegocio, utils/fecha.js).
@@ -467,13 +531,16 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     }
 
     // ---- 5) El cobro --------------------------------------------------------
-    const total = subtotal - descuentoLealtad;
+    // Pedido a domicilio: se suma el cargo de envío fijo (se le paga al repartidor cada
+    // semana). Nunca afecta el descuento de lealtad (que se calcula sobre el subtotal).
+    const cargoEnvio = tipo_entrega === 'domicilio' ? await tarifaEnvioVigente() : 0;
+    const total = subtotal - descuentoLealtad + cargoEnvio;
 
     const venta = await client.query(
-      `INSERT INTO ventas (orden_id, subtotal, descuento_lealtad, total, metodo_pago, cajero_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO ventas (orden_id, subtotal, descuento_lealtad, total, metodo_pago, cajero_id, cargo_envio)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [orden.rows[0].id, subtotal, descuentoLealtad, total, metodo_pago, req.usuario.id],
+      [orden.rows[0].id, subtotal, descuentoLealtad, total, metodo_pago, req.usuario.id, cargoEnvio],
     );
 
     // Se registra la visita (y, si aplica, el descuento) ya con el id real
@@ -899,7 +966,8 @@ router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (
         [lineasACancelar.map((l) => l.id)],
       );
       const subtotalVenta = Number(venta.rows[0].subtotal);
-      const proporcion = subtotalVenta > 0 ? Number(venta.rows[0].total) / subtotalVenta : 1;
+      const proporcion =
+        subtotalVenta > 0 ? (Number(venta.rows[0].total) - Number(venta.rows[0].cargo_envio || 0)) / subtotalVenta : 1;
       montoReembolso = Math.round((valorTotalMerma + Number(extras.rows[0].total)) * proporcion * 100) / 100;
     }
     if (montoReembolso > 0) {

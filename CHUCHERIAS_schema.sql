@@ -317,6 +317,7 @@ CREATE TABLE ventas (
     fecha                TIMESTAMP NOT NULL DEFAULT NOW(),
     subtotal             NUMERIC(10,2) NOT NULL,
     descuento_lealtad    NUMERIC(10,2) NOT NULL DEFAULT 0,
+    cargo_envio          NUMERIC(10,2) NOT NULL DEFAULT 0,
     total                NUMERIC(10,2) NOT NULL,
     metodo_pago          VARCHAR(20) NOT NULL CHECK (metodo_pago IN ('efectivo','transferencia')),
     estado               VARCHAR(20) NOT NULL DEFAULT 'completada'
@@ -545,3 +546,10 @@ INSERT INTO checklist_items (tipo, descripcion, orden) VALUES
   ('cierre', 'Sacar la basura y los desperdicios', 3),
   ('cierre', 'Hacer el corte de caja', 4),
   ('cierre', 'Apagar las luces', 5);
+
+-- Configuración general del negocio (una sola fila): tarifa de envío a domicilio.
+CREATE TABLE IF NOT EXISTS config_negocio (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    tarifa_envio_domicilio  NUMERIC(10,2) NOT NULL DEFAULT 25 CHECK (tarifa_envio_domicilio >= 0)
+);
+INSERT INTO config_negocio (id, tarifa_envio_domicilio) VALUES (1, 25) ON CONFLICT (id) DO NOTHING;
