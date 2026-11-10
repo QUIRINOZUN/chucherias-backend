@@ -539,4 +539,57 @@ router.delete('/historial', requiereRol('administrador'), async (req, res) => {
   }
 });
 
+// DELETE /api/insumos/:id
+// Elimina un insumo (p. ej. uno dado de alta por error). Se rechaza si algún
+// platillo lo usa en su receta. Su propio historial de entradas/compras se
+// borra junto con él; si además tiene mermas u otros registros ligados, el
+// servidor lo rechaza (409) y no se borra nada.
+router.delete('/:id', async (req, res) => {
+  const cliente = await pool.connect();
+  try {
+    const insumo = (await cliente.query('SELECT id, nombre FROM insumos WHERE id = $1', [req.params.id])).rows[0];
+    if (!insumo) {
+      return res.status(404).json({ error: 'El insumo no existe.' });
+    }
+    const recetas = (
+      await cliente.query(
+        `SELECT DISTINCT p.nombre FROM receta_insumos ri
+         JOIN recetas r ON r.id = ri.receta_id
+         JOIN variantes_producto v ON v.id = r.variante_id
+         JOIN productos p ON p.id = v.producto_id
+         WHERE ri.insumo_id = $1 LIMIT 5`,
+        [insumo.id],
+      )
+    ).rows;
+    if (recetas.length) {
+      return res.status(409).json({
+        error: `No se puede eliminar: lo usan las recetas de ${recetas.map((r) => r.nombre).join(', ')}. Quítalo de esas recetas primero.`,
+      });
+    }
+    await cliente.query('BEGIN');
+    await cliente.query('DELETE FROM insumo_compras WHERE insumo_id = $1', [insumo.id]);
+    await cliente.query('DELETE FROM movimientos_inventario WHERE insumo_id = $1', [insumo.id]);
+    await cliente.query('DELETE FROM insumos WHERE id = $1', [insumo.id]);
+    await cliente.query('COMMIT');
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'eliminar_historial',
+      detalle: `Inventario: se eliminó el insumo "${insumo.nombre}".`,
+    });
+    res.json({ mensaje: 'Insumo eliminado.' });
+  } catch (error) {
+    await cliente.query('ROLLBACK').catch(() => {});
+    if (error.code === '23503') {
+      return res
+        .status(409)
+        .json({ error: 'No se puede eliminar: el insumo ya tiene registros ligados (mermas o ventas).' });
+    }
+    console.error(error);
+    res.status(500).json({ error: 'Error al eliminar el insumo.' });
+  } finally {
+    cliente.release();
+  }
+});
+
 module.exports = router;
