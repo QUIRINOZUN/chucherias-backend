@@ -57,6 +57,7 @@ const nominaRoutes = require('./routes/nomina');
 const ventasEspecialesRoutes = require('./routes/ventasEspeciales');
 const gastosRoutes = require('./routes/gastos');
 const bitacoraRoutes = require('./routes/bitacora');
+const negocioRoutes = require('./routes/negocio');
 
 const app = express();
 
@@ -163,6 +164,8 @@ app.use('/api/ventas-especiales', ventasEspecialesRoutes);
 app.use('/api/gastos', gastosRoutes);
 
 app.use('/api/bitacora', bitacoraRoutes);
+// Datos del establecimiento para los tickets (nombre, dirección, teléfono, horario, logotipo).
+app.use('/api/negocio', negocioRoutes);
 
 // -----------------------------------------------------------------------------
 // Rutas de diagnóstico (no requieren sesión)

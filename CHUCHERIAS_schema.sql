@@ -553,3 +553,11 @@ CREATE TABLE IF NOT EXISTS config_negocio (
     tarifa_envio_domicilio  NUMERIC(10,2) NOT NULL DEFAULT 25 CHECK (tarifa_envio_domicilio >= 0)
 );
 INSERT INTO config_negocio (id, tarifa_envio_domicilio) VALUES (1, 25) ON CONFLICT (id) DO NOTHING;
+
+-- Datos del negocio para los tickets (ver migraciones/2026-11-10_config_negocio_ticket.sql).
+ALTER TABLE config_negocio
+  ADD COLUMN IF NOT EXISTS nombre VARCHAR(80), ADD COLUMN IF NOT EXISTS titular VARCHAR(120),
+  ADD COLUMN IF NOT EXISTS rfc VARCHAR(20), ADD COLUMN IF NOT EXISTS direccion VARCHAR(200),
+  ADD COLUMN IF NOT EXISTS telefono VARCHAR(30), ADD COLUMN IF NOT EXISTS horario VARCHAR(120),
+  ADD COLUMN IF NOT EXISTS leyenda VARCHAR(160), ADD COLUMN IF NOT EXISTS logo_url TEXT,
+  ADD COLUMN IF NOT EXISTS logo_public_id TEXT;
