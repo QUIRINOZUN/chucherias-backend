@@ -34,10 +34,20 @@ async function estadoDeCuenta(id) {
   if (guardado && ahora - guardado.ts < TTL_CUENTA_MS) {
     return guardado.cuenta;
   }
-  const resultado = await pool.query(
-    'SELECT u.activo, r.nombre AS rol FROM usuarios u JOIN roles r ON r.id = u.rol_id WHERE u.id = $1',
-    [id],
-  );
+  let resultado;
+  try {
+    resultado = await pool.query(
+      'SELECT u.activo, u.debe_cambiar_contrasena, r.nombre AS rol FROM usuarios u JOIN roles r ON r.id = u.rol_id WHERE u.id = $1',
+      [id],
+    );
+  } catch (error) {
+    // 42703: la migración 2026-11-16 (cambio obligatorio de contraseña) aún no se corrió.
+    if (error.code !== '42703') throw error;
+    resultado = await pool.query(
+      'SELECT u.activo, r.nombre AS rol FROM usuarios u JOIN roles r ON r.id = u.rol_id WHERE u.id = $1',
+      [id],
+    );
+  }
   const cuenta = resultado.rows[0] || null;
   cacheCuentas.set(id, { cuenta, ts: ahora });
   return cuenta;
@@ -63,6 +73,14 @@ async function verificarToken(req, res, next) {
     const cuenta = await estadoDeCuenta(payload.id);
     if (!cuenta || !cuenta.activo) {
       return res.status(401).json({ error: 'La cuenta ya no está activa. Inicia sesión de nuevo.' });
+    }
+    // Cambio obligatorio de contraseña: mientras esté pendiente, SOLO se puede
+    // usar /api/auth/* (cambiarla, ver quién soy). Así no se evita desde la API.
+    if (cuenta.debe_cambiar_contrasena && !req.originalUrl.startsWith('/api/auth/')) {
+      return res.status(403).json({
+        error: 'Debes cambiar tu contraseña antes de continuar.',
+        debe_cambiar_contrasena: true,
+      });
     }
     // El rol vigente en la base manda sobre el que traía el token.
     req.usuario = { ...payload, rol: cuenta.rol };

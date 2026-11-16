@@ -34,6 +34,23 @@ const pool = require('../db');
 const { verificarToken, invalidarCuenta } = require('../middleware/auth');
 const { errorContrasena } = require('../utils/validar');
 const { registrarAccion } = require('../utils/bitacora');
+const { generarSecreto, verificarCodigo, uriOtpauth } = require('../utils/totp');
+
+// Columnas de seguridad de cuenta (migración 2026-11-16). Si la migración aún
+// no se corrió en la base, se asume "sin 2FA y sin cambio obligatorio" en vez
+// de romper el login (error 42703 = columna inexistente).
+async function leerSeguridad(id) {
+  try {
+    const r = await pool.query(
+      'SELECT debe_cambiar_contrasena, totp_activo, totp_secreto FROM usuarios WHERE id = $1',
+      [id],
+    );
+    return r.rows[0] || { debe_cambiar_contrasena: false, totp_activo: false, totp_secreto: null };
+  } catch (error) {
+    if (error.code === '42703') return { debe_cambiar_contrasena: false, totp_activo: false, totp_secreto: null };
+    throw error;
+  }
+}
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -53,11 +70,22 @@ const limitadorLogin = rateLimit({
   },
 });
 
+// Contador PROPIO para activar/desactivar el 2FA: así no se gasta el presupuesto
+// de intentos de inicio de sesión (todo el personal comparte la misma IP del
+// negocio). Más holgado: son acciones con sesión ya iniciada.
+const limitador2fa = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos. Intenta de nuevo en unos minutos.' },
+});
+
 // POST /api/auth/login
 // Recibe usuario y contraseña, devuelve un token si son correctos.
 // Esta es la ÚNICA ruta de la API que no exige token (no puede: es la que lo entrega).
 router.post('/login', limitadorLogin, async (req, res) => {
-  const { usuario, contrasena } = req.body;
+  const { usuario, contrasena, codigo } = req.body;
 
   // Validación básica: ambos campos son obligatorios.
   if (typeof usuario !== 'string' || typeof contrasena !== 'string' || !usuario || !contrasena) {
@@ -93,6 +121,19 @@ router.post('/login', limitadorLogin, async (req, res) => {
       return res.status(401).json({ error: 'Usuario o contraseña incorrectos.' });
     }
 
+    // Verificación en dos pasos (si la cuenta la activó): tras validar la
+    // contraseña se exige el código de 6 dígitos de la app autenticadora.
+    // Sin código → 200 { requiere_codigo: true } para que el login lo pida.
+    const seguridad = await leerSeguridad(usuarioEncontrado.id);
+    if (seguridad.totp_activo) {
+      if (codigo === undefined || codigo === null || codigo === '') {
+        return res.json({ requiere_codigo: true });
+      }
+      if (!verificarCodigo(seguridad.totp_secreto, String(codigo))) {
+        return res.status(401).json({ error: 'El código de verificación no es correcto.' });
+      }
+    }
+
     // Datos que viajan DENTRO del token (y que el middleware verificarToken
     // expondrá luego como req.usuario). Nunca incluye la contraseña ni su hash.
     const payload = {
@@ -117,7 +158,12 @@ router.post('/login', limitadorLogin, async (req, res) => {
       detalle: `Rol: ${usuarioEncontrado.rol}`,
     });
 
-    res.json({ token, usuario: payload });
+    res.json({
+      token,
+      usuario: payload,
+      debe_cambiar_contrasena: !!seguridad.debe_cambiar_contrasena,
+      totp_activo: !!seguridad.totp_activo,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al iniciar sesión.' });
@@ -126,8 +172,18 @@ router.post('/login', limitadorLogin, async (req, res) => {
 
 // GET /api/auth/me
 // Devuelve los datos del usuario actualmente autenticado (según su token).
-router.get('/me', verificarToken, (req, res) => {
-  res.json({ usuario: req.usuario });
+router.get('/me', verificarToken, async (req, res) => {
+  try {
+    const seg = await leerSeguridad(req.usuario.id);
+    res.json({
+      usuario: req.usuario,
+      debe_cambiar_contrasena: !!seg.debe_cambiar_contrasena,
+      totp_activo: !!seg.totp_activo,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al consultar la cuenta.' });
+  }
 });
 
 // PATCH /api/auth/contrasena
@@ -159,6 +215,12 @@ router.patch('/contrasena', verificarToken, limitadorLogin, async (req, res) => 
     }
     const hash = await bcrypt.hash(nueva, 10);
     await pool.query('UPDATE usuarios SET contrasena_hash = $1 WHERE id = $2', [hash, req.usuario.id]);
+    // Ya eligió contraseña propia: se quita el cambio obligatorio (si la columna existe).
+    await pool
+      .query('UPDATE usuarios SET debe_cambiar_contrasena = FALSE WHERE id = $1', [req.usuario.id])
+      .catch((e) => {
+        if (e.code !== '42703') throw e;
+      });
     invalidarCuenta(req.usuario.id);
 
     registrarAccion({
@@ -171,6 +233,80 @@ router.patch('/contrasena', verificarToken, limitadorLogin, async (req, res) => 
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al cambiar la contraseña.' });
+  }
+});
+
+// ---- Verificación en dos pasos (cualquier rol, sobre su propia cuenta) ----
+
+// POST /api/auth/2fa/preparar — genera un secreto nuevo (aún inactivo) y lo
+// devuelve junto con la URI para el QR. No cambia nada hasta /activar.
+router.post('/2fa/preparar', verificarToken, async (req, res) => {
+  try {
+    const seg = await leerSeguridad(req.usuario.id);
+    if (seg.totp_activo) {
+      return res.status(409).json({ error: 'La verificación en dos pasos ya está activada.' });
+    }
+    const secreto = generarSecreto();
+    await pool.query('UPDATE usuarios SET totp_secreto = $1, totp_activo = FALSE WHERE id = $2', [
+      secreto,
+      req.usuario.id,
+    ]);
+    res.json({ secreto, uri: uriOtpauth(secreto, req.usuario.usuario) });
+  } catch (error) {
+    if (error.code === '42703') {
+      return res.status(503).json({ error: 'Esta función todavía no está habilitada en el servidor.' });
+    }
+    console.error(error);
+    res.status(500).json({ error: 'Error al preparar la verificación en dos pasos.' });
+  }
+});
+
+// POST /api/auth/2fa/activar { codigo } — comprueba que la app ya genera
+// códigos válidos con ese secreto y entonces la activa.
+router.post('/2fa/activar', verificarToken, limitador2fa, async (req, res) => {
+  try {
+    const seg = await leerSeguridad(req.usuario.id);
+    if (!seg.totp_secreto) {
+      return res.status(400).json({ error: 'Primero genera el código QR.' });
+    }
+    if (!verificarCodigo(seg.totp_secreto, String(req.body.codigo ?? ''))) {
+      return res.status(400).json({ error: 'El código no es correcto. Revisa la hora de tu teléfono.' });
+    }
+    await pool.query('UPDATE usuarios SET totp_activo = TRUE WHERE id = $1', [req.usuario.id]);
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'cambio_contrasena',
+      detalle: 'Activó la verificación en dos pasos.',
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al activar la verificación en dos pasos.' });
+  }
+});
+
+// POST /api/auth/2fa/desactivar { contrasena, codigo } — exige contraseña Y
+// código vigente, para que quien use una sesión abierta ajena no pueda apagarla.
+router.post('/2fa/desactivar', verificarToken, limitador2fa, async (req, res) => {
+  const { contrasena, codigo } = req.body;
+  try {
+    const fila = await pool.query('SELECT contrasena_hash FROM usuarios WHERE id = $1', [req.usuario.id]);
+    const seg = await leerSeguridad(req.usuario.id);
+    if (!seg.totp_activo) {
+      return res.status(400).json({ error: 'La verificación en dos pasos no está activada.' });
+    }
+    if (typeof contrasena !== 'string' || !(await bcrypt.compare(contrasena, fila.rows[0].contrasena_hash))) {
+      return res.status(401).json({ error: 'La contraseña no es correcta.' });
+    }
+    if (!verificarCodigo(seg.totp_secreto, String(codigo ?? ''))) {
+      return res.status(401).json({ error: 'El código no es correcto.' });
+    }
+    await pool.query('UPDATE usuarios SET totp_activo = FALSE, totp_secreto = NULL WHERE id = $1', [req.usuario.id]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al desactivar la verificación en dos pasos.' });
   }
 });
 

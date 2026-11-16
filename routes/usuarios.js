@@ -53,6 +53,21 @@ const { verificarToken, requiereRol, invalidarCuenta } = require('../middleware/
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio } = require('../utils/fecha');
 
+// Marca la cuenta para que elija contraseña propia en su próximo inicio de
+// sesión (columna de la migración 2026-11-16). Con SAVEPOINT: si la columna
+// aún no existe (migración sin correr), el error 42703 no aborta la
+// transacción completa — simplemente no se marca.
+async function exigirCambioDeContrasena(client, usuarioId) {
+  await client.query('SAVEPOINT exigir_cambio');
+  try {
+    await client.query('UPDATE usuarios SET debe_cambiar_contrasena = TRUE WHERE id = $1', [usuarioId]);
+    await client.query('RELEASE SAVEPOINT exigir_cambio');
+  } catch (error) {
+    if (error.code !== '42703') throw error;
+    await client.query('ROLLBACK TO SAVEPOINT exigir_cambio');
+  }
+}
+
 // Puesto por default al auto-crear el empleado de una cuenta nueva — el
 // administrador/encargado lo puede editar después desde Asistencias →
 // Empleados si hace falta algo más específico.
@@ -157,6 +172,7 @@ router.post('/', requiereRol('administrador'), async (req, res) => {
       [nombreLimpio, usuarioLimpio, contrasenaHash, rol_id],
     );
     const nuevoUsuario = resultado.rows[0];
+    await exigirCambioDeContrasena(client, nuevoUsuario.id);
 
     // El administrador no lleva asistencia — cualquier otro rol sí, así que
     // se le crea su empleado ligado de una vez (sin esto, "no veo
@@ -262,6 +278,10 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
       [nuevoNombre, nuevoUsuario, nuevoRolId, nuevoHash, id],
     );
     const usuarioActualizado = resultado.rows[0];
+    // El administrador asignó una contraseña a otra persona: debe cambiarla al entrar.
+    if (contrasena && Number(id) !== req.usuario.id) {
+      await exigirCambioDeContrasena(client, usuarioActualizado.id);
+    }
 
     // Sincroniza con el empleado ligado (si existe) o resuelve el cambio de
     // rol de/hacia administrador — ver nota del encabezado del archivo.
@@ -317,6 +337,33 @@ router.patch('/:id', requiereRol('administrador'), async (req, res) => {
 // su historial permanece intacto. Se espeja el mismo activo/inactivo en el
 // empleado ligado (si tiene uno) — una cuenta desactivada no debe seguir
 // viéndose "activa" en Asistencias.
+// PATCH /api/usuarios/:id/2fa/reiniciar — el administrador desactiva la
+// verificación en dos pasos de una cuenta (teléfono perdido o cambiado). La
+// persona podrá volver a activarla desde su sesión.
+router.patch('/:id/2fa/reiniciar', requiereRol('administrador'), async (req, res) => {
+  try {
+    const r = await pool.query(
+      'UPDATE usuarios SET totp_activo = FALSE, totp_secreto = NULL WHERE id = $1 RETURNING id, nombre',
+      [req.params.id],
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    invalidarCuenta(req.params.id);
+    registrarAccion({
+      usuarioId: req.usuario.id,
+      usuarioNombre: req.usuario.nombre,
+      accion: 'cambio_contrasena',
+      detalle: `Reinició la verificación en dos pasos de ${r.rows[0].nombre}.`,
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    if (error.code === '42703') {
+      return res.status(503).json({ error: 'Esta función todavía no está habilitada en el servidor.' });
+    }
+    console.error(error);
+    res.status(500).json({ error: 'Error al reiniciar la verificación en dos pasos.' });
+  }
+});
+
 router.patch('/:id/activo', requiereRol('administrador'), async (req, res) => {
   const { id } = req.params;
   const { activo } = req.body; // true o false
