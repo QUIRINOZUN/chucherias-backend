@@ -183,6 +183,19 @@ async function generarNumeroOrden(client) {
   return prefijo + String(r.rows[0].maximo + 1).padStart(4, '0');
 }
 
+// Venta ya registrada con esta clave de idempotencia (2026-11-16): devuelve lo mismo
+// que devolvió la primera vez, marcado como duplicada=true. null si no existe.
+async function ventaPorClave(clave) {
+  const r = await pool.query(
+    `SELECT o.id AS orden_id FROM ordenes o JOIN ventas v ON v.orden_id = o.id WHERE o.clave_idempotencia = $1`,
+    [clave],
+  );
+  if (r.rows.length === 0) return null;
+  const orden = await pool.query('SELECT * FROM ordenes WHERE id = $1', [r.rows[0].orden_id]);
+  const venta = await pool.query('SELECT * FROM ventas WHERE orden_id = $1', [r.rows[0].orden_id]);
+  return { orden: orden.rows[0], venta: venta.rows[0], duplicada: true };
+}
+
 // POST /api/ventas
 // Registra una venta del punto de venta en una sola transacción:
 // orden + orden_detalle + venta. Los precios NUNCA se toman del cliente,
@@ -194,6 +207,7 @@ async function generarNumeroOrden(client) {
 //     cliente_nombre?, cliente_direccion?, cliente_telefono?, (obligatorios SOLO si domicilio)
 //     repartidor_id?,   (opcional, solo tiene sentido si domicilio — ver sección 2)
 //     propina?, (monto extra que deja el cliente — NO es ingreso, ver migración 2026-11-16_propinas)
+//     clave?, (identificador único de la venta generado por el POS: evita duplicarla si se reintenta, 2026-11-16)
 //     programada_para?, (ISO 8601: hora para la que se pidió — pedido programado, 2026-11-16)
 //     items: [{ variante_id, cantidad, notas? }],
 //     cliente_id? }      (RF-21/RF-22: cliente de lealtad, opcional — ver sección 4)
@@ -229,6 +243,16 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     }
     if (propinaRecibida > 0 && !(await tieneColumna('ventas', 'propina'))) {
       return res.status(503).json({ error: 'Las propinas todavía no están habilitadas en el servidor.' });
+    }
+  }
+
+  // Clave de idempotencia (2026-11-16): si esta venta ya se registró, se devuelve tal cual.
+  let claveIdempotencia = null;
+  if (typeof req.body.clave === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(req.body.clave)) {
+    if (await tieneColumna('ordenes', 'clave_idempotencia')) {
+      claveIdempotencia = req.body.clave;
+      const yaRegistrada = await ventaPorClave(claveIdempotencia);
+      if (yaRegistrada) return res.status(200).json(yaRegistrada);
     }
   }
 
@@ -388,6 +412,12 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
 
     if (programadaPara) {
       await client.query('UPDATE ordenes SET programada_para = $1 WHERE id = $2', [programadaPara, orden.rows[0].id]);
+    }
+    if (claveIdempotencia) {
+      await client.query('UPDATE ordenes SET clave_idempotencia = $1 WHERE id = $2', [
+        claveIdempotencia,
+        orden.rows[0].id,
+      ]);
     }
 
     // RF-08: abre el primer renglón de tiempo por estado, que
@@ -655,6 +685,11 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     // Los errores "esperados" (validaciones) se lanzan como { status, mensaje }.
     if (error.status) {
       return res.status(error.status).json({ error: error.mensaje });
+    }
+    // Dos envíos simultáneos con la misma clave: gana el primero, el otro recibe esa venta.
+    if (error.code === '23505' && claveIdempotencia) {
+      const yaRegistrada = await ventaPorClave(claveIdempotencia);
+      if (yaRegistrada) return res.status(200).json(yaRegistrada);
     }
     console.error(error);
     res.status(500).json({ error: 'Error al registrar la venta.' });
