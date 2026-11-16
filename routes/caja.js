@@ -59,6 +59,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
+const { tieneColumna } = require('../utils/esquema');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -73,17 +74,21 @@ const ROLES_CAJA = ['administrador', 'encargado', 'cajero'];
 // Solo suma ventas 'completada': las canceladas no cuentan para caja.
 // Devuelve siempre { efectivo, transferencia } (0 si no hubo ventas de ese tipo).
 async function totalesDelDia(fecha) {
+  // Propinas (2026-11-16): si la columna ya existe, también se suman por método.
+  const colPropina = (await tieneColumna('ventas', 'propina')) ? 'COALESCE(SUM(propina), 0)' : '0';
   const resultado = await pool.query(
-    `SELECT metodo_pago, COALESCE(SUM(total), 0) AS total
+    `SELECT metodo_pago, COALESCE(SUM(total), 0) AS total, ${colPropina} AS propina
      FROM ventas
      WHERE estado = 'completada' AND ${diaNegocioSql('fecha')} = $1
      GROUP BY metodo_pago`,
     [fecha],
   );
 
-  const totales = { efectivo: 0, transferencia: 0 };
+  const totales = { efectivo: 0, transferencia: 0, propinaEfectivo: 0, propinaTransferencia: 0 };
   for (const fila of resultado.rows) {
     totales[fila.metodo_pago] = Number(fila.total);
+    if (fila.metodo_pago === 'efectivo') totales.propinaEfectivo = Number(fila.propina);
+    else totales.propinaTransferencia = Number(fila.propina);
   }
   return totales;
 }
@@ -151,13 +156,21 @@ async function movimientosCajaDelDia(fecha) {
 async function resumenCajaDelDia(fecha) {
   const ventas = await totalesDelDia(fecha);
   const movimientos = await movimientosCajaDelDia(fecha);
+  // Las propinas no son ingreso, pero sí dinero que entró: suman al esperado de su método.
   const totalEfectivo =
-    ventas.efectivo + movimientos.apertura + movimientos.ingreso - movimientos.retiro - movimientos.reembolso;
+    ventas.efectivo +
+    ventas.propinaEfectivo +
+    movimientos.apertura +
+    movimientos.ingreso -
+    movimientos.retiro -
+    movimientos.reembolso;
 
-  const totalTransferencia = ventas.transferencia - movimientos.reembolsoTransferencia;
+  const totalTransferencia = ventas.transferencia + ventas.propinaTransferencia - movimientos.reembolsoTransferencia;
 
   return {
     ventas_efectivo: ventas.efectivo,
+    propinas_efectivo: ventas.propinaEfectivo,
+    propinas_transferencia: ventas.propinaTransferencia,
     apertura: movimientos.apertura,
     ingresos_efectivo: movimientos.ingreso,
     retiros_efectivo: movimientos.retiro,

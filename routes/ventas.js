@@ -192,6 +192,7 @@ async function generarNumeroOrden(client) {
 //     tipo_entrega?: 'presencial'|'domicilio',            (por defecto presencial)
 //     cliente_nombre?, cliente_direccion?, cliente_telefono?, (obligatorios SOLO si domicilio)
 //     repartidor_id?,   (opcional, solo tiene sentido si domicilio — ver sección 2)
+//     propina?, (monto extra que deja el cliente — NO es ingreso, ver migración 2026-11-16_propinas)
 //     programada_para?, (ISO 8601: hora para la que se pidió — pedido programado, 2026-11-16)
 //     items: [{ variante_id, cantidad, notas? }],
 //     cliente_id? }      (RF-21/RF-22: cliente de lealtad, opcional — ver sección 4)
@@ -215,6 +216,19 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
   }
   if (!['presencial', 'domicilio'].includes(tipo_entrega)) {
     return res.status(400).json({ error: 'El tipo de entrega debe ser presencial o domicilio.' });
+  }
+
+  // Propina (2026-11-16): dinero extra que deja el cliente. Se guarda aparte del
+  // total (no es ingreso del negocio) pero Caja la suma al esperado de su método.
+  let propinaRecibida = 0;
+  if (req.body.propina !== undefined && req.body.propina !== null && req.body.propina !== '') {
+    propinaRecibida = Math.round(Number(req.body.propina) * 100) / 100;
+    if (!Number.isFinite(propinaRecibida) || propinaRecibida < 0 || propinaRecibida > 5000) {
+      return res.status(400).json({ error: 'La propina debe ser un monto entre 0 y 5,000.' });
+    }
+    if (propinaRecibida > 0 && !(await tieneColumna('ventas', 'propina'))) {
+      return res.status(503).json({ error: 'Las propinas todavía no están habilitadas en el servidor.' });
+    }
   }
 
   // Pedido programado (2026-11-16): hora para la que se pidió. Debe ser una fecha
@@ -570,6 +584,15 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
        RETURNING *`,
       [orden.rows[0].id, subtotal, descuentoLealtad, total, metodo_pago, req.usuario.id, cargoEnvio],
     );
+    // La propina nunca puede ser mayor que la propia venta (evita un error de captura de ceros).
+    if (propinaRecibida > total) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'La propina no puede ser mayor que el total de la venta.' });
+    }
+    if (propinaRecibida > 0) {
+      await client.query('UPDATE ventas SET propina = $1 WHERE id = $2', [propinaRecibida, venta.rows[0].id]);
+      venta.rows[0].propina = propinaRecibida;
+    }
 
     // Se registra la visita (y, si aplica, el descuento) ya con el id real
     // de la venta — después de insertarla, para poder ligarlos.
