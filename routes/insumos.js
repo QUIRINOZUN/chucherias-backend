@@ -42,7 +42,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
 const { registrarAccion } = require('../utils/bitacora');
-const { diaNegocioSql, fechaValida } = require('../utils/fecha');
+const { diaNegocioSql, fechaValida, fechaHoyNegocio } = require('../utils/fecha');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -149,6 +149,102 @@ router.post('/categorias', async (req, res) => {
     }
     console.error(error);
     res.status(500).json({ error: 'Error al crear la categoría.' });
+  }
+});
+
+// POST /api/insumos/conteo  { conteos: [{ insumo_id, cantidad_contada }], nota? }
+// CONTEO FÍSICO (2026-11-16): se cuenta lo que hay de verdad en la bodega y el
+// servidor compara contra la existencia que CALCULÓ el sistema. Por cada insumo
+// cuya cuenta no coincide se registra UN ajuste (positivo o negativo) con el
+// motivo "Conteo físico AAAA-MM-DD"; los que coinciden no generan nada. Todo en
+// una sola transacción: o se aplica el conteo completo o no se aplica nada.
+// Si lo que faltó fue una pérdida real (se cayó, caducó), conviene registrarla
+// antes como Merma para que salga en el reporte de mermas; el conteo solo
+// corrige la diferencia que quede.
+// Con { aplicar: false } solo SIMULA: devuelve las diferencias sin escribir.
+router.post('/conteo', async (req, res) => {
+  const { conteos, nota, aplicar } = req.body;
+  if (!Array.isArray(conteos) || conteos.length === 0) {
+    return res.status(400).json({ error: 'Envía al menos un insumo contado.' });
+  }
+  if (conteos.length > 500) {
+    return res.status(400).json({ error: 'Máximo 500 insumos por conteo.' });
+  }
+  const vistos = new Set();
+  for (const c of conteos) {
+    const idNum = Number(c?.insumo_id);
+    const contada = Number(c?.cantidad_contada);
+    if (!Number.isInteger(idNum) || idNum <= 0) {
+      return res.status(400).json({ error: 'Hay un insumo con id inválido.' });
+    }
+    if (c.cantidad_contada === '' || c.cantidad_contada === null || !Number.isFinite(contada) || contada < 0) {
+      return res.status(400).json({ error: 'Cada cantidad contada debe ser un número de cero o más.' });
+    }
+    if (vistos.has(idNum)) {
+      return res.status(400).json({ error: 'Un insumo está repetido en el conteo.' });
+    }
+    vistos.add(idNum);
+  }
+  if (nota !== undefined && nota !== null && typeof nota !== 'string') {
+    return res.status(400).json({ error: 'La nota debe ser texto.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ids = [...vistos];
+    const actuales = await client.query(
+      `SELECT i.id, i.nombre, i.unidad_medida, ${EXPRESION_EXISTENCIA} AS existencia
+       FROM insumos i
+       LEFT JOIN movimientos_inventario m ON m.insumo_id = i.id
+       WHERE i.id = ANY($1::int[])
+       GROUP BY i.id`,
+      [ids],
+    );
+    if (actuales.rows.length !== ids.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Algún insumo del conteo no existe.' });
+    }
+    const porId = new Map(actuales.rows.map((f) => [f.id, f]));
+    const motivo = `Conteo físico ${fechaHoyNegocio()}${nota?.trim() ? ` — ${nota.trim().slice(0, 150)}` : ''}`;
+
+    const diferencias = [];
+    for (const c of conteos) {
+      const fila = porId.get(Number(c.insumo_id));
+      const sistema = Math.round(Number(fila.existencia) * 100) / 100;
+      const contada = Math.round(Number(c.cantidad_contada) * 100) / 100;
+      const diferencia = Math.round((contada - sistema) * 100) / 100;
+      if (diferencia === 0) continue;
+      diferencias.push({
+        insumo_id: fila.id,
+        nombre: fila.nombre,
+        unidad_medida: fila.unidad_medida,
+        sistema,
+        contada,
+        diferencia,
+      });
+      if (aplicar !== false) {
+        await client.query(
+          `INSERT INTO movimientos_inventario (insumo_id, tipo, cantidad, responsable_id, motivo)
+           VALUES ($1, 'ajuste', $2, $3, $4)`,
+          [fila.id, diferencia, req.usuario.id, motivo],
+        );
+      }
+    }
+
+    await client.query(aplicar === false ? 'ROLLBACK' : 'COMMIT');
+    res.json({
+      aplicado: aplicar !== false,
+      contados: conteos.length,
+      sin_diferencia: conteos.length - diferencias.length,
+      diferencias,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error(error);
+    res.status(500).json({ error: 'Error al registrar el conteo físico.' });
+  } finally {
+    client.release();
   }
 });
 
