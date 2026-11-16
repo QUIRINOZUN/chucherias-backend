@@ -61,6 +61,7 @@ function fechaValida(texto) {
 }
 
 module.exports = {
+  ZONA_NEGOCIO,
   fechaHoyNegocio,
   diaNegocioSql,
   horaAhoraNegocioSql,

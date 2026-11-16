@@ -56,7 +56,8 @@
 const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
-const { diaNegocioSql, fechaValida } = require('../utils/fecha');
+const { diaNegocioSql, fechaValida, ZONA_NEGOCIO } = require('../utils/fecha');
+const { clasificarMenu } = require('../utils/ingenieriaMenu');
 const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
 
 const router = express.Router();
@@ -409,6 +410,104 @@ router.get('/resumen', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al generar el reporte.' });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// GET /api/reportes/ingenieria-menu?desde=&hasta=  (2026-11-16)
+// -----------------------------------------------------------------------------
+// Responde "¿qué conviene vender?": cada variante vendida en el periodo con sus
+// unidades, ingreso, costo y margen, clasificada con el método clásico de
+// ingeniería de menú (Kasavana-Smith) — ver utils/ingenieriaMenu.js:
+//   estrella      = popular + margen alto      → mantener y presumir
+//   caballo       = popular + margen bajo      → subir precio o bajar costo
+//   rompecabezas  = poco popular + margen alto → promoverlo
+//   perro         = poco popular + margen bajo → candidato a retirarse
+// Una variante sin receta o con algún insumo sin costo capturado NO se
+// clasifica (no se inventa un margen): sale como "sin_costo" con su venta.
+// Además: ventas por día de la semana y por hora del día (hora de Durango).
+router.get('/ingenieria-menu', async (req, res) => {
+  const { desde, hasta } = req.query;
+  if ((desde && !fechaValida(desde)) || (hasta && !fechaValida(hasta))) {
+    return res.status(400).json({ error: 'Las fechas deben tener el formato AAAA-MM-DD.' });
+  }
+  const rango = [desde || null, hasta || null];
+  const filtroFecha = `AND ($1::date IS NULL OR ${diaNegocioSql('v.fecha')} >= $1::date)
+           AND ($2::date IS NULL OR ${diaNegocioSql('v.fecha')} <= $2::date)`;
+  const horaLocal = `((v.fecha AT TIME ZONE 'UTC') AT TIME ZONE '${ZONA_NEGOCIO}')`;
+
+  try {
+    const [variantes, porDia, porHora] = await Promise.all([
+      pool.query(
+        `WITH costo_por_receta AS (
+           SELECT ri.receta_id,
+                  SUM(ri.cantidad * i.costo_unitario) AS costo_unitario_receta,
+                  BOOL_AND(i.costo_unitario IS NOT NULL) AS costo_completo
+           FROM receta_insumos ri
+           JOIN insumos i ON i.id = ri.insumo_id
+           GROUP BY ri.receta_id
+         )
+         SELECT vp.id AS variante_id, p.nombre AS producto, vp.nombre AS variante,
+                c.nombre AS categoria,
+                SUM(od.cantidad)::int AS unidades,
+                SUM(od.cantidad * od.precio_unitario) AS ingreso,
+                MAX(cpr.costo_unitario_receta) AS costo_unitario,
+                COALESCE(BOOL_AND(cpr.costo_completo), FALSE) AS costo_completo
+         FROM ventas v
+         JOIN orden_detalle od ON od.orden_id = v.orden_id AND od.cancelado = FALSE
+         JOIN variantes_producto vp ON vp.id = od.variante_id
+         JOIN productos p ON p.id = vp.producto_id
+         LEFT JOIN categorias c ON c.id = p.categoria_id
+         LEFT JOIN recetas r ON r.variante_id = od.variante_id
+         LEFT JOIN costo_por_receta cpr ON cpr.receta_id = r.id
+         WHERE v.estado = 'completada' ${filtroFecha}
+         GROUP BY vp.id, p.nombre, vp.nombre, c.nombre
+         ORDER BY unidades DESC, p.nombre`,
+        rango,
+      ),
+      pool.query(
+        `SELECT EXTRACT(DOW FROM ${horaLocal})::int AS dia,
+                COUNT(*)::int AS ventas, COALESCE(SUM(v.total), 0) AS monto
+         FROM ventas v
+         WHERE v.estado = 'completada' ${filtroFecha}
+         GROUP BY 1 ORDER BY 1`,
+        rango,
+      ),
+      pool.query(
+        `SELECT EXTRACT(HOUR FROM ${horaLocal})::int AS hora,
+                COUNT(*)::int AS ventas, COALESCE(SUM(v.total), 0) AS monto
+         FROM ventas v
+         WHERE v.estado = 'completada' ${filtroFecha}
+         GROUP BY 1 ORDER BY 1`,
+        rango,
+      ),
+    ]);
+
+    const filas = variantes.rows.map((f) => {
+      const ingreso = Number(f.ingreso);
+      const costoUnit = f.costo_completo && f.costo_unitario !== null ? Number(f.costo_unitario) : null;
+      const precioProm = f.unidades ? ingreso / f.unidades : 0;
+      return {
+        variante_id: f.variante_id,
+        producto: f.producto,
+        variante: f.variante,
+        categoria: f.categoria,
+        unidades: f.unidades,
+        ingreso,
+        costo_unitario: costoUnit,
+        margen_unitario: costoUnit === null ? null : precioProm - costoUnit,
+        margen_total: costoUnit === null ? null : ingreso - costoUnit * f.unidades,
+      };
+    });
+
+    res.json({
+      ...clasificarMenu(filas),
+      por_dia_semana: porDia.rows.map((f) => ({ dia: f.dia, ventas: f.ventas, monto: Number(f.monto) })),
+      por_hora: porHora.rows.map((f) => ({ hora: f.hora, ventas: f.ventas, monto: Number(f.monto) })),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al generar el análisis del menú.' });
   }
 });
 
