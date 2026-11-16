@@ -57,6 +57,7 @@ const nominaRoutes = require('./routes/nomina');
 const ventasEspecialesRoutes = require('./routes/ventasEspeciales');
 const gastosRoutes = require('./routes/gastos');
 const comprasRoutes = require('./routes/compras');
+const promocionesRoutes = require('./routes/promociones');
 const bitacoraRoutes = require('./routes/bitacora');
 const negocioRoutes = require('./routes/negocio');
 
@@ -165,6 +166,8 @@ app.use('/api/ventas-especiales', ventasEspecialesRoutes);
 app.use('/api/gastos', gastosRoutes);
 // Compras a proveedores: sugerencias de surtido, órdenes y recepción (2026-11-16).
 app.use('/api/compras', comprasRoutes);
+// Promociones con vigencia: descuentos por día, hora y fechas (2026-11-16).
+app.use('/api/promociones', promocionesRoutes);
 
 app.use('/api/bitacora', bitacoraRoutes);
 // Datos del establecimiento para los tickets (nombre, dirección, teléfono, horario, logotipo).

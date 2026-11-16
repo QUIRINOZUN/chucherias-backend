@@ -90,6 +90,7 @@ const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
 const { tieneColumna } = require('../utils/esquema');
+const { promocionesVigentes, precioConPromocion } = require('../utils/promociones');
 const {
   calcularInsumosDeOrden,
   calcularInsumosDeLineas,
@@ -282,7 +283,7 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     // más abajo si esta orden nace en 'sin_preparar' (normal) o salta
     // directo a 'por_entregar' — ver sección 3.5.
     const variantesResultado = await client.query(
-      `SELECT vp.id, vp.precio, p.requiere_preparacion
+      `SELECT vp.id, vp.precio, vp.producto_id, p.categoria_id, p.requiere_preparacion
          FROM variantes_producto vp
          JOIN productos p ON p.id = vp.producto_id
          WHERE vp.id = ANY($1::int[]) AND vp.activo = TRUE AND p.activo = TRUE`,
@@ -293,8 +294,20 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     // consultar cada dato rápido, sin repetir la consulta por línea.
     const precioPorVariante = {};
     const requierePreparacionPorVariante = {};
+    // Promociones (2026-11-16): la promoción vigente AHORA se vuelve el precio de la
+    // variante (se congela en orden_detalle.precio_unitario como cualquier precio).
+    // Es el mismo cálculo que ve el POS (GET /api/productos?con_promociones=1);
+    // nunca se confía en un precio enviado por el cliente.
+    const promosVigentes = await promocionesVigentes(client);
     for (const fila of variantesResultado.rows) {
-      precioPorVariante[fila.id] = Number(fila.precio);
+      precioPorVariante[fila.id] =
+        promosVigentes.length > 0
+          ? precioConPromocion(
+              Number(fila.precio),
+              { varianteId: fila.id, productoId: fila.producto_id, categoriaId: fila.categoria_id },
+              promosVigentes,
+            ).precio
+          : Number(fila.precio);
       requierePreparacionPorVariante[fila.id] = fila.requiere_preparacion;
     }
 
