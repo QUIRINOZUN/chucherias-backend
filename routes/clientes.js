@@ -23,6 +23,8 @@
 // =============================================================================
 const express = require('express');
 const pool = require('../db');
+const { tieneColumna } = require('../utils/esquema');
+const { fechaHoyNegocio } = require('../utils/fecha');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaValida, diaNegocioSql } = require('../utils/fecha');
@@ -116,6 +118,55 @@ router.get('/', async (req, res) => {
   }
 });
 
+// GET /api/clientes/recordatorios?dias=30  (2026-11-16)
+// Dos listas para "tratar bien" a la clientela de lealtad:
+//   - cumpleanos_mes: quién cumple años este mes (si la columna fecha_nacimiento
+//     ya existe; si no, lista vacía y cumpleanos_disponible=false);
+//   - inactivos: clientes que ya habían venido pero llevan más de N días (30 por
+//     default, entre 7 y 365) sin una visita contada.
+// Solo informativo: nunca modifica nada.
+router.get('/recordatorios', async (req, res) => {
+  const dias = Math.min(Math.max(parseInt(req.query.dias, 10) || 30, 7), 365);
+  try {
+    const hayNacimiento = await tieneColumna('clientes', 'fecha_nacimiento');
+    let cumpleanos = [];
+    if (hayNacimiento) {
+      const r = await pool.query(
+        `SELECT id, nombre_completo, telefono,
+                to_char(fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento,
+                EXTRACT(DAY FROM fecha_nacimiento)::int AS dia
+         FROM clientes
+         WHERE fecha_nacimiento IS NOT NULL
+           AND EXTRACT(MONTH FROM fecha_nacimiento) = EXTRACT(MONTH FROM $1::date)
+         ORDER BY dia, nombre_completo`,
+        [fechaHoyNegocio()],
+      );
+      cumpleanos = r.rows;
+    }
+    const inactivos = await pool.query(
+      `SELECT c.id, c.nombre_completo, c.telefono, c.visitas_acumuladas,
+              MAX(lh.fecha) AS ultima_visita,
+              (CURRENT_DATE - MAX(lh.fecha)::date)::int AS dias_sin_venir
+       FROM clientes c
+       JOIN lealtad_historial lh ON lh.cliente_id = c.id AND lh.tipo_evento = 'visita'
+       GROUP BY c.id
+       HAVING MAX(lh.fecha) < NOW() - make_interval(days => $1::int)
+       ORDER BY ultima_visita DESC
+       LIMIT 50`,
+      [dias],
+    );
+    res.json({
+      cumpleanos_disponible: hayNacimiento,
+      cumpleanos_mes: cumpleanos,
+      dias_inactividad: dias,
+      inactivos: inactivos.rows,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener los recordatorios.' });
+  }
+});
+
 // GET /api/clientes/:id
 // Detalle de un cliente + su historial de lealtad completo (visitas y
 // descuentos aplicados, más recientes primero), para poder explicarle a un
@@ -123,8 +174,11 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
   try {
+    const colNacimiento = (await tieneColumna('clientes', 'fecha_nacimiento'))
+      ? "to_char(fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento"
+      : 'NULL::text AS fecha_nacimiento';
     const cliente = await pool.query(
-      `SELECT id, nombre_completo, telefono, visitas_acumuladas, fecha_registro
+      `SELECT id, nombre_completo, telefono, visitas_acumuladas, fecha_registro, ${colNacimiento}
        FROM clientes WHERE id = $1`,
       [id],
     );
@@ -214,7 +268,26 @@ router.patch('/:id', async (req, res) => {
     return res.status(400).json({ error: 'El nombre del cliente es obligatorio.' });
   }
 
+  // Fecha de nacimiento (opcional): undefined = no tocar; ''/null = quitarla.
+  const nacimientoRecibido = req.body.fecha_nacimiento;
+  let nacimiento;
+  if (nacimientoRecibido !== undefined) {
+    if (nacimientoRecibido === null || nacimientoRecibido === '') {
+      nacimiento = null;
+    } else if (fechaValida(nacimientoRecibido) && nacimientoRecibido <= fechaHoyNegocio()) {
+      nacimiento = nacimientoRecibido;
+    } else {
+      return res.status(400).json({ error: 'La fecha de nacimiento no es válida (AAAA-MM-DD, no futura).' });
+    }
+    if (nacimiento !== null && !(await tieneColumna('clientes', 'fecha_nacimiento'))) {
+      return res.status(503).json({ error: 'El cumpleaños todavía no está habilitado en el servidor.' });
+    }
+  }
+
   try {
+    if (nacimiento !== undefined && (await tieneColumna('clientes', 'fecha_nacimiento'))) {
+      await pool.query('UPDATE clientes SET fecha_nacimiento = $1 WHERE id = $2', [nacimiento, id]);
+    }
     const resultado = await pool.query(
       `UPDATE clientes SET nombre_completo = $1, telefono = $2
        WHERE id = $3
