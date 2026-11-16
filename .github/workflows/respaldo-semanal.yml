@@ -30,6 +30,11 @@ on:
     - cron: '0 14 * * 1'
   workflow_dispatch:
 
+# Permiso para abrir un "issue" de aviso si el respaldo falla (ver el último paso).
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   respaldo:
     runs-on: ubuntu-latest
@@ -89,3 +94,25 @@ jobs:
           path: respaldo-${{ env.FECHA }}.dump.gpg
           retention-days: 90
           if-no-files-found: error
+
+      # ALERTA: si cualquier paso anterior falla, se abre un issue en este repo
+      # (GitHub avisa por correo al dueño). Así un respaldo roto no pasa
+      # semanas sin que nadie lo note. Si ya hay un aviso abierto, solo se le
+      # agrega un comentario en vez de abrir uno nuevo cada semana.
+      - name: Avisar que el respaldo falló
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          URL_EJECUCION: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITULO="⚠️ Falló el respaldo semanal de la base de datos"
+          CUERPO="El respaldo programado no se completó. Revisa los detalles aquí: $URL_EJECUCION
+
+          Causas comunes: contraseña de Neon rotada (actualizar el secreto DATABASE_URL) o secreto BACKUP_PASSPHRASE faltante.
+          Cuando se resuelva, lanza el flujo a mano con 'Run workflow' y cierra este aviso."
+          ABIERTO=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$TITULO in:title" --json number --jq '.[0].number')
+          if [ -n "$ABIERTO" ]; then
+            gh issue comment "$ABIERTO" --repo "$GITHUB_REPOSITORY" --body "Volvió a fallar: $URL_EJECUCION"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITULO" --body "$CUERPO"
+          fi
