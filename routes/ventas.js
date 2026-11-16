@@ -89,6 +89,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
+const { tieneColumna } = require('../utils/esquema');
 const {
   calcularInsumosDeOrden,
   calcularInsumosDeLineas,
@@ -191,6 +192,7 @@ async function generarNumeroOrden(client) {
 //     tipo_entrega?: 'presencial'|'domicilio',            (por defecto presencial)
 //     cliente_nombre?, cliente_direccion?, cliente_telefono?, (obligatorios SOLO si domicilio)
 //     repartidor_id?,   (opcional, solo tiene sentido si domicilio — ver sección 2)
+//     programada_para?, (ISO 8601: hora para la que se pidió — pedido programado, 2026-11-16)
 //     items: [{ variante_id, cantidad, notas? }],
 //     cliente_id? }      (RF-21/RF-22: cliente de lealtad, opcional — ver sección 4)
 // Respuesta 201: { orden, venta }.
@@ -213,6 +215,28 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
   }
   if (!['presencial', 'domicilio'].includes(tipo_entrega)) {
     return res.status(400).json({ error: 'El tipo de entrega debe ser presencial o domicilio.' });
+  }
+
+  // Pedido programado (2026-11-16): hora para la que se pidió. Debe ser una fecha
+  // válida, no pasada (se tolera 10 min de retraso al teclear) y a lo más a 7 días.
+  let programadaPara = null;
+  if (req.body.programada_para !== undefined && req.body.programada_para !== null && req.body.programada_para !== '') {
+    const fechaProg = new Date(req.body.programada_para);
+    const ahora = Date.now();
+    if (Number.isNaN(fechaProg.getTime())) {
+      return res.status(400).json({ error: 'La hora del pedido programado no es válida.' });
+    }
+    if (fechaProg.getTime() < ahora - 10 * 60 * 1000) {
+      return res.status(400).json({ error: 'La hora del pedido programado ya pasó.' });
+    }
+    if (fechaProg.getTime() > ahora + 7 * 24 * 60 * 60 * 1000) {
+      return res.status(400).json({ error: 'Un pedido solo se puede programar hasta con 7 días de anticipación.' });
+    }
+    if (!(await tieneColumna('ordenes', 'programada_para'))) {
+      return res.status(503).json({ error: 'Los pedidos programados todavía no están habilitados en el servidor.' });
+    }
+    // ISO en UTC con "Z": la columna es TIMESTAMP (sin zona) y guarda UTC como todo lo demás.
+    programadaPara = fechaProg.toISOString();
   }
 
   // 2026-10-11/12: nombre, dirección y teléfono del cliente, obligatorios
@@ -334,6 +358,10 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
         repartidorId,
       ],
     );
+
+    if (programadaPara) {
+      await client.query('UPDATE ordenes SET programada_para = $1 WHERE id = $2', [programadaPara, orden.rows[0].id]);
+    }
 
     // RF-08: abre el primer renglón de tiempo por estado, que
     // routes/ordenes.js irá cerrando y reabriendo en cada avance. Si la

@@ -87,6 +87,7 @@ const {
   calcularInsumosDeLineas,
   registrarMovimientosInventario,
 } = require('../utils/inventarioOrden');
+const { tieneColumna } = require('../utils/esquema');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -125,17 +126,24 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
     : ['sin_preparar', 'preparando', 'por_entregar'];
 
   try {
+    // Pedidos programados (2026-11-16): si la columna ya existe, se devuelve la hora
+    // y las órdenes se ordenan por la hora que de verdad importa a cocina (la
+    // programada, o la de creación si no tiene).
+    const hayProgramada = await tieneColumna('ordenes', 'programada_para');
+    const colProgramada = hayProgramada ? 'o.programada_para' : 'NULL::timestamp AS programada_para';
+    const ordenPor = hayProgramada ? 'COALESCE(o.programada_para, o.fecha_creacion)' : 'o.fecha_creacion';
+
     // Consulta 1: las órdenes en los estados pedidos (más antiguas primero).
     const ordenes = await pool.query(
       `SELECT o.id, o.numero_orden, o.estado, o.tipo_entrega, o.fecha_creacion,
               o.cliente_nombre, o.cliente_direccion, o.cliente_telefono,
               o.repartidor_id, e.nombre AS repartidor_nombre,
-              o.cocinero_id, ec.nombre AS cocinero_nombre
+              o.cocinero_id, ec.nombre AS cocinero_nombre, ${colProgramada}
        FROM ordenes o
        LEFT JOIN empleados e ON e.id = o.repartidor_id
        LEFT JOIN empleados ec ON ec.id = o.cocinero_id
        WHERE o.estado = ANY($1::varchar[])
-       ORDER BY o.fecha_creacion ASC`,
+       ORDER BY ${ordenPor} ASC`,
       [estadosSolicitados],
     );
 
