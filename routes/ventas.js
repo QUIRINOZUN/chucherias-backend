@@ -89,7 +89,7 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
-const { tieneColumna } = require('../utils/esquema');
+const { tieneColumna, tieneTabla } = require('../utils/esquema');
 const {
   calcularInsumosDeOrden,
   calcularInsumosDeLineas,
@@ -979,6 +979,21 @@ router.patch('/:id/cancelar', requiereRol('administrador', 'encargado'), async (
         `UPDATE orden_estado_historial SET fecha_fin = NOW() WHERE orden_id = $1 AND fecha_fin IS NULL`,
         [ordenId],
       );
+      // EMBALAJE (2026-11-17): si la orden se cancela antes de armarse el producto (sin_preparar o
+      // preparando), el embalaje elegido nunca se usó y regresa al inventario. Desde 'por_entregar' ya
+      // va empacado con el producto (misma regla que los insumos: queda consumido).
+      if (['sin_preparar', 'preparando'].includes(estadoOrden) && (await tieneTabla('orden_embalajes'))) {
+        const embalajes = await client.query('SELECT insumo_id, cantidad FROM orden_embalajes WHERE orden_id = $1', [
+          ordenId,
+        ]);
+        for (const e of embalajes.rows) {
+          await client.query(
+            `INSERT INTO movimientos_inventario (insumo_id, tipo, cantidad, responsable_id, motivo)
+             VALUES ($1, 'entrada', $2, $3, $4)`,
+            [e.insumo_id, e.cantidad, req.usuario.id, `Embalaje devuelto por cancelación — orden ${numeroOrden}`],
+          );
+        }
+      }
     }
     // Si quedan líneas activas, la venta sigue 'completada' y la comanda sigue
     // su curso normal con lo que le queda — solo se le quitaron productos.

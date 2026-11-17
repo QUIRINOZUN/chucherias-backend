@@ -140,10 +140,22 @@ router.post('/marcar', requiereRol(...ROLES_OPERATIVOS), async (req, res) => {
 // DELETE /api/checklist/marcar/:itemId — desmarcar HOY (por si se equivocaron).
 router.delete('/marcar/:itemId', requiereRol(...ROLES_OPERATIVOS), async (req, res) => {
   try {
-    await pool.query('DELETE FROM checklist_marcas WHERE item_id = $1 AND fecha = $2', [
-      req.params.itemId,
-      fechaHoyNegocio(),
-    ]);
+    // Un paso marcado por otra persona solo lo desmarcan administrador o encargado; el resto de
+    // roles únicamente deshace lo que marcó él mismo.
+    const esSupervisor = ['administrador', 'encargado'].includes(req.usuario.rol);
+    const resultado = await pool.query(
+      `DELETE FROM checklist_marcas WHERE item_id = $1 AND fecha = $2 AND ($3::boolean OR marcado_por = $4)`,
+      [req.params.itemId, fechaHoyNegocio(), esSupervisor, req.usuario.id],
+    );
+    if (resultado.rowCount === 0) {
+      const existe = await pool.query('SELECT 1 FROM checklist_marcas WHERE item_id = $1 AND fecha = $2', [
+        req.params.itemId,
+        fechaHoyNegocio(),
+      ]);
+      if (existe.rows.length > 0) {
+        return res.status(403).json({ error: 'Este paso lo marcó otra persona; solo un encargado puede desmarcarlo.' });
+      }
+    }
     res.json({ ok: true });
   } catch (error) {
     console.error(error);

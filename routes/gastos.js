@@ -216,6 +216,26 @@ router.get('/alertas', async (req, res) => {
   }
 });
 
+// POST /api/gastos/alertas/baja — { categoria_id, concepto }: deja de avisar de un gasto recurrente
+// que ya no se paga. Quita el día de pago de toda la serie (conserva los gastos y su historial).
+router.post('/alertas/baja', async (req, res) => {
+  const { categoria_id, concepto } = req.body;
+  if (!Number.isInteger(categoria_id) || typeof concepto !== 'string' || !concepto.trim()) {
+    return res.status(400).json({ error: 'Indica la categoría y el concepto del gasto.' });
+  }
+  try {
+    const r = await pool.query(
+      `UPDATE gastos SET dia_pago_mes = NULL
+        WHERE categoria_id = $1 AND concepto = $2 AND es_recurrente = TRUE AND dia_pago_mes IS NOT NULL`,
+      [categoria_id, concepto],
+    );
+    res.json({ actualizados: r.rowCount });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al dar de baja la alerta.' });
+  }
+});
+
 // POST /api/gastos
 // Cuerpo esperado: { categoria_id, concepto, monto, fecha, forma_pago,
 //                     es_recurrente?, dia_pago_mes?, dias_aviso_previo?,
