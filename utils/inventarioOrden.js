@@ -24,25 +24,18 @@
 // una copia que pudiera desincronizarse.
 // =============================================================================
 
-const { embalajesDeOrden } = require('./embalajes');
-
 // Devuelve [{ insumo_id, cantidad }] de TODAS las líneas activas (no
 // canceladas) de una orden — lo usa el descuento al pasar a 'preparando'.
-// Incluye también el embalaje elegido para la orden (2026-11-17): es de toda la orden, no de
-// una línea, así que solo entra aquí y no en la cancelación parcial por líneas.
+// El embalaje (2026-11-17) NO entra aquí: lo elige quien empaca desde Comandas y se descuenta en ese
+// momento (ver PATCH /api/ordenes/:id/embalajes).
 async function calcularInsumosDeOrden(client, ordenId) {
   const lineas = await client.query(`SELECT id FROM orden_detalle WHERE orden_id = $1 AND cancelado = FALSE`, [
     ordenId,
   ]);
-  const deLineas = await calcularInsumosDeLineas(
+  return calcularInsumosDeLineas(
     client,
     lineas.rows.map((r) => r.id),
   );
-  const acumulado = new Map(deLineas.map((i) => [i.insumo_id, i.cantidad]));
-  for (const e of await embalajesDeOrden(client, ordenId)) {
-    acumulado.set(e.insumo_id, (acumulado.get(e.insumo_id) ?? 0) + e.cantidad);
-  }
-  return [...acumulado.entries()].map(([insumo_id, cantidad]) => ({ insumo_id, cantidad }));
 }
 
 // Igual que calcularInsumosDeOrden, pero para un subconjunto EXPLÍCITO de

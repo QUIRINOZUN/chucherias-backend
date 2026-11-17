@@ -88,6 +88,7 @@ const {
   registrarMovimientosInventario,
 } = require('../utils/inventarioOrden');
 const { tieneColumna, tieneTabla } = require('../utils/esquema');
+const { validarEmbalajes } = require('../utils/embalajes');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -183,13 +184,17 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
     const embalajePorOrden = {};
     if (await tieneTabla('orden_embalajes')) {
       const emb = await pool.query(
-        `SELECT oe.orden_id, oe.cantidad, i.nombre
+        `SELECT oe.orden_id, oe.insumo_id, oe.cantidad, i.nombre
          FROM orden_embalajes oe JOIN insumos i ON i.id = oe.insumo_id
          WHERE oe.orden_id = ANY($1::int[]) ORDER BY i.nombre`,
         [ordenIds],
       );
       for (const f of emb.rows) {
-        (embalajePorOrden[f.orden_id] ||= []).push({ nombre: f.nombre, cantidad: Number(f.cantidad) });
+        (embalajePorOrden[f.orden_id] ||= []).push({
+          insumo_id: f.insumo_id,
+          nombre: f.nombre,
+          cantidad: Number(f.cantidad),
+        });
       }
     }
 
@@ -395,6 +400,72 @@ router.patch('/:id/cocinero', requiereRol(...ROLES_QUE_ASIGNAN_COCINERO), async 
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Error al asignar el cocinero.' });
+  }
+});
+
+// PATCH /api/ordenes/:id/embalajes (2026-11-17)
+// Quien empaca elige el embalaje para llevar (charolas, cajas, bolsas) desde Comandas. Cuerpo:
+// { embalajes: [{ insumo_id, cantidad }] } — la lista COMPLETA actual (vacía = ninguno). El inventario
+// se ajusta con la diferencia contra lo que ya estaba guardado: lo que sube sale del inventario y lo
+// que baja se regresa, así corregir la elección no descuenta dos veces. Solo órdenes que siguen en
+// el tablero (sin_preparar, preparando o por_entregar).
+router.patch('/:id/embalajes', requiereRol(...ROLES_QUE_AVANZAN), async (req, res) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const orden = await client.query('SELECT id, estado, numero_orden FROM ordenes WHERE id = $1 FOR UPDATE', [id]);
+    if (orden.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'La orden no existe.' });
+    }
+    if (!['sin_preparar', 'preparando', 'por_entregar'].includes(orden.rows[0].estado)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Esta orden ya no está en el tablero; no se puede cambiar su embalaje.' });
+    }
+    const nuevos = await validarEmbalajes(client, req.body.embalajes, 'venta');
+    if (!(await tieneTabla('orden_embalajes'))) {
+      await client.query('ROLLBACK');
+      return res.status(503).json({ error: 'Los embalajes todavía no están habilitados en el servidor.' });
+    }
+    const previos = await client.query('SELECT insumo_id, cantidad FROM orden_embalajes WHERE orden_id = $1', [id]);
+    const antes = new Map(previos.rows.map((f) => [f.insumo_id, Number(f.cantidad)]));
+    const despues = new Map(nuevos.map((e) => [e.insumo_id, e.cantidad]));
+    for (const insumoId of new Set([...antes.keys(), ...despues.keys()])) {
+      const delta = (despues.get(insumoId) ?? 0) - (antes.get(insumoId) ?? 0);
+      if (delta === 0) continue;
+      await client.query(
+        `INSERT INTO movimientos_inventario (insumo_id, tipo, cantidad, responsable_id, motivo, orden_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          insumoId,
+          delta > 0 ? 'salida' : 'entrada',
+          Math.abs(delta),
+          req.usuario.id,
+          delta > 0
+            ? `Embalaje de ${orden.rows[0].numero_orden}`
+            : `Embalaje corregido en ${orden.rows[0].numero_orden}`,
+          delta > 0 ? id : null,
+        ],
+      );
+    }
+    await client.query('DELETE FROM orden_embalajes WHERE orden_id = $1', [id]);
+    for (const e of nuevos) {
+      await client.query('INSERT INTO orden_embalajes (orden_id, insumo_id, cantidad) VALUES ($1, $2, $3)', [
+        id,
+        e.insumo_id,
+        e.cantidad,
+      ]);
+    }
+    await client.query('COMMIT');
+    res.json({ embalajes: nuevos });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (error.status) return res.status(error.status).json({ error: error.mensaje });
+    console.error(error);
+    res.status(500).json({ error: 'Error al guardar el embalaje.' });
+  } finally {
+    client.release();
   }
 });
 

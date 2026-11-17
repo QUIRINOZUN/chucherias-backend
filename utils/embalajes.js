@@ -7,7 +7,7 @@
 // Las ventas guardan cuántos de cada uno se usaron (orden_embalajes / venta_especial_embalajes).
 // Todo tolera que la migración 2026-11-17_embalajes.sql aún no se haya corrido.
 // =============================================================================
-const { tieneColumna, tieneTabla } = require('./esquema');
+const { tieneColumna } = require('./esquema');
 
 async function embalajesDisponibles() {
   return tieneColumna('insumos', 'embalaje_uso');
@@ -40,11 +40,4 @@ async function validarEmbalajes(ejecutor, lista, uso) {
   return ids.map((insumo_id) => ({ insumo_id, cantidad: acumulado.get(insumo_id) }));
 }
 
-// Embalaje de una orden de venta, para sumarlo a lo que se descuenta del inventario.
-async function embalajesDeOrden(ejecutor, ordenId) {
-  if (!(await tieneTabla('orden_embalajes'))) return [];
-  const r = await ejecutor.query('SELECT insumo_id, cantidad FROM orden_embalajes WHERE orden_id = $1', [ordenId]);
-  return r.rows.map((f) => ({ insumo_id: f.insumo_id, cantidad: Number(f.cantidad) }));
-}
-
-module.exports = { embalajesDisponibles, validarEmbalajes, embalajesDeOrden };
+module.exports = { embalajesDisponibles, validarEmbalajes };

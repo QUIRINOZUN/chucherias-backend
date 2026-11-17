@@ -6,7 +6,7 @@
 // las rutas de /api/insumos/:id/... que ya existen; aquí solo vive su catálogo (alta, edición,
 // baja) separado en dos usos: ventas normales y ventas especiales.
 //
-//   GET    /?uso=venta|especial  cajero también (el POS necesita elegir); costos solo admin/encargado
+//   GET    /?uso=venta|especial  cajero y auxiliar también (Comandas elige el embalaje); costos solo admin/encargado
 //   POST   /                     { nombre, unidad_medida?, uso, clase?, cantidad_minima?, costo_unitario?, proveedor_id? }
 //   PATCH  /:id                  edición parcial
 //   DELETE /:id                  solo si nunca se ha usado
@@ -31,7 +31,7 @@ async function exigirMigracion(res) {
   return false;
 }
 
-router.get('/', requiereRol(...GESTORES, 'cajero'), async (req, res) => {
+router.get('/', requiereRol(...GESTORES, 'cajero', 'auxiliar'), async (req, res) => {
   const { uso } = req.query;
   if (uso !== undefined && !USOS.includes(uso)) {
     return res.status(400).json({ error: `El uso debe ser uno de: ${USOS.join(', ')}.` });
