@@ -66,7 +66,6 @@
 const express = require('express');
 const multer = require('multer');
 const pool = require('../db');
-const { promocionesVigentes, precioConPromocion } = require('../utils/promociones');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { subirImagen, borrarImagen } = require('../utils/cloudinary');
 const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
@@ -303,29 +302,6 @@ router.get('/productos', async (req, res) => {
         fecha_edicion: variante.fecha_edicion,
         insumos_suficientes: suficientesPorVariante[variante.id] ?? true,
       });
-    }
-
-    // Promociones (2026-11-16): SOLO si el POS lo pide (?con_promociones=1). Las
-    // pantallas de gestión del menú necesitan el precio de lista para editarlo; si
-    // vieran el precio con descuento, podrían guardarlo como precio normal.
-    if (req.query.con_promociones === '1') {
-      const promos = await promocionesVigentes(pool);
-      if (promos.length > 0) {
-        for (const producto of productos.rows) {
-          for (const variante of variantesPorProducto[producto.id] || []) {
-            const r = precioConPromocion(
-              variante.precio,
-              { varianteId: variante.id, productoId: producto.id, categoriaId: producto.categoria_id },
-              promos,
-            );
-            if (r.promocion) {
-              variante.precio_original = variante.precio;
-              variante.precio = r.precio;
-              variante.promocion = r.promocion;
-            }
-          }
-        }
-      }
     }
 
     const resultado = productos.rows.map((producto) => ({
