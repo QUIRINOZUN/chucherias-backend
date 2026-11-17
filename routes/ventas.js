@@ -265,7 +265,10 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
     if (Number.isNaN(fechaProg.getTime())) {
       return res.status(400).json({ error: 'La hora del pedido programado no es válida.' });
     }
-    if (fechaProg.getTime() < ahora - 10 * 60 * 1000) {
+    // Una venta que estuvo en la cola sin internet llega con su clave y puede llegar tarde: ya está
+    // cobrada, así que no se rechaza; se registra sin hora programada en vez de perderla.
+    const yaPaso = fechaProg.getTime() < ahora - 10 * 60 * 1000;
+    if (yaPaso && !req.body.clave) {
       return res.status(400).json({ error: 'La hora del pedido programado ya pasó.' });
     }
     if (fechaProg.getTime() > ahora + 7 * 24 * 60 * 60 * 1000) {
@@ -275,7 +278,7 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
       return res.status(503).json({ error: 'Los pedidos programados todavía no están habilitados en el servidor.' });
     }
     // ISO en UTC con "Z": la columna es TIMESTAMP (sin zona) y guarda UTC como todo lo demás.
-    programadaPara = fechaProg.toISOString();
+    programadaPara = yaPaso ? null : fechaProg.toISOString();
   }
 
   // 2026-10-11/12: nombre, dirección y teléfono del cliente, obligatorios

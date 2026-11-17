@@ -105,7 +105,8 @@ router.get('/', async (req, res) => {
       ...fila,
       existencia: Number(fila.existencia),
       cantidad_minima: Number(fila.cantidad_minima),
-      alerta: Number(fila.existencia) <= Number(fila.cantidad_minima),
+      // Sin mínimo capturado (0) no hay alerta: no se sabe cuánto es "poco".
+      alerta: Number(fila.cantidad_minima) > 0 && Number(fila.existencia) <= Number(fila.cantidad_minima),
     }));
 
     res.json(insumos);

@@ -140,7 +140,7 @@ router.get('/resumen', async (req, res) => {
       pool.query(
         `SELECT
            COUNT(*)::int AS total_insumos,
-           COUNT(*) FILTER (WHERE existencia <= cantidad_minima)::int AS bajo_minimo
+           COUNT(*) FILTER (WHERE cantidad_minima > 0 AND existencia <= cantidad_minima)::int AS bajo_minimo
          FROM (
            SELECT i.id, i.cantidad_minima,
              ${EXPRESION_EXISTENCIA} AS existencia

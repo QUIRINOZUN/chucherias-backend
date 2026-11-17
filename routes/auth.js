@@ -63,6 +63,10 @@ require('../utils/validarParametros').validarParametrosId(router);
 const limitadorLogin = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
+  // Solo cuentan los intentos FALLIDOS: todo el personal comparte la IP del negocio y, con la
+  // verificación en dos pasos, cada entrada son dos peticiones; si contaran los éxitos, cuatro
+  // personas entrando al abrir bloquearían el sistema para todos.
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   message: {

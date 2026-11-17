@@ -55,7 +55,7 @@ router.get('/sugerencias', async (req, res) => {
        LEFT JOIN proveedores p ON p.id = i.proveedor_id
        WHERE i.cantidad_minima > 0
        GROUP BY i.id, p.nombre
-       HAVING ${EXPRESION_EXISTENCIA} < i.cantidad_minima
+       HAVING ${EXPRESION_EXISTENCIA} <= i.cantidad_minima
        ORDER BY p.nombre NULLS LAST, i.nombre`,
     );
 
