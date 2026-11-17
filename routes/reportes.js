@@ -59,6 +59,46 @@ const { verificarToken, requiereRol } = require('../middleware/auth');
 const { diaNegocioSql, fechaValida, ZONA_NEGOCIO } = require('../utils/fecha');
 const { clasificarMenu } = require('../utils/ingenieriaMenu');
 const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
+const { tieneTabla } = require('../utils/esquema');
+
+// Costo del embalaje y las decoraciones usados en el periodo (2026-11-17): ventas normales completadas
+// (orden_embalajes) y ventas especiales ya entregadas (venta_especial_embalajes). Es un costo de la
+// venta igual que los insumos de la receta, así que entra a la utilidad bruta. Lo que no tiene costo
+// capturado no se adivina: se cuenta en `sin_costo` para avisarlo.
+async function costoEmbalajes(desde, hasta) {
+  const salida = { costo: 0, sin_costo: 0 };
+  if (await tieneTabla('orden_embalajes')) {
+    const r = await pool.query(
+      `SELECT COALESCE(SUM(oe.cantidad * i.costo_unitario) FILTER (WHERE i.costo_unitario IS NOT NULL), 0) AS costo,
+              COUNT(*) FILTER (WHERE i.costo_unitario IS NULL)::int AS sin_costo
+       FROM ventas v
+       JOIN orden_embalajes oe ON oe.orden_id = v.orden_id
+       JOIN insumos i ON i.id = oe.insumo_id
+       WHERE v.estado = 'completada'
+         AND ($1::date IS NULL OR ${diaNegocioSql('v.fecha')} >= $1::date)
+         AND ($2::date IS NULL OR ${diaNegocioSql('v.fecha')} <= $2::date)`,
+      [desde, hasta],
+    );
+    salida.costo += Number(r.rows[0].costo);
+    salida.sin_costo += r.rows[0].sin_costo;
+  }
+  if (await tieneTabla('venta_especial_embalajes')) {
+    const r = await pool.query(
+      `SELECT COALESCE(SUM(x.cantidad * i.costo_unitario) FILTER (WHERE i.costo_unitario IS NOT NULL), 0) AS costo,
+              COUNT(*) FILTER (WHERE i.costo_unitario IS NULL)::int AS sin_costo
+       FROM ventas_especiales ve
+       JOIN venta_especial_embalajes x ON x.venta_especial_id = ve.id
+       JOIN insumos i ON i.id = x.insumo_id
+       WHERE ve.estado = 'entregada'
+         AND ($1::date IS NULL OR ve.fecha_evento >= $1::date)
+         AND ($2::date IS NULL OR ve.fecha_evento <= $2::date)`,
+      [desde, hasta],
+    );
+    salida.costo += Number(r.rows[0].costo);
+    salida.sin_costo += r.rows[0].sin_costo;
+  }
+  return salida;
+}
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -342,6 +382,8 @@ router.get('/resumen', async (req, res) => {
       ),
     ]);
 
+    const embalaje = await costoEmbalajes(rango[0], rango[1]);
+
     // Reembolsos de cancelaciones PARCIALES (la venta sigue completada y su
     // total nunca se reduce): dinero que salió y no es ingreso real.
     const reembolsosParciales = await pool.query(
@@ -374,13 +416,16 @@ router.get('/resumen', async (req, res) => {
       rentabilidad: (() => {
         const ingresos = Number(ventas.rows[0].monto_total) - Number(reembolsosParciales.rows[0].total);
         const costoVentasReal = Number(costoVentas.rows[0].costo_ventas);
-        const utilidadBruta = ingresos - costoVentasReal;
+        const costoEmbalajeReal = embalaje.costo;
+        const utilidadBruta = ingresos - costoVentasReal - costoEmbalajeReal;
         const costoManoObraReal = Number(costoManoObra.rows[0].costo_mano_obra);
         const gastosGeneralesReal = Number(gastosGenerales.rows[0].gastos_generales);
         const utilidadNeta = utilidadBruta - costoManoObraReal - gastosGeneralesReal;
         return {
           ingresos,
           costo_ventas: costoVentasReal,
+          costo_embalaje: costoEmbalajeReal,
+          embalajes_sin_costo: embalaje.sin_costo,
           utilidad_bruta: utilidadBruta,
           margen_porcentaje: ingresos > 0 ? Math.round((utilidadBruta / ingresos) * 1000) / 10 : null,
           lineas_con_costo: costoVentas.rows[0].lineas_con_costo,

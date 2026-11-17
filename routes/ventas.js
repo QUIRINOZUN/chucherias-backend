@@ -90,6 +90,7 @@ const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaHoyNegocio, diaNegocioSql, fechaValida } = require('../utils/fecha');
 const { tieneColumna } = require('../utils/esquema');
+const { validarEmbalajes } = require('../utils/embalajes');
 const {
   calcularInsumosDeOrden,
   calcularInsumosDeLineas,
@@ -500,6 +501,18 @@ router.post('/', requiereRol('administrador', 'encargado', 'cajero'), async (req
           [detalle.rows[0].id, insumo.rows[0].id, elegido.cantidad, elegido.unidad_medida, costoExtraAplicado],
         );
       }
+    }
+
+    // ---- 3.4) Embalaje para llevar (2026-11-17) ------------------------------
+    // Charolas, cajas de pizza, etc., elegidas en el cobro. Son de toda la orden; se descuentan
+    // junto con los insumos (al pasar a 'preparando', o aquí mismo si la orden no pasa por cocina).
+    const embalajesVenta = await validarEmbalajes(client, req.body.embalajes, 'venta');
+    for (const e of embalajesVenta) {
+      await client.query('INSERT INTO orden_embalajes (orden_id, insumo_id, cantidad) VALUES ($1, $2, $3)', [
+        orden.rows[0].id,
+        e.insumo_id,
+        e.cantidad,
+      ]);
     }
 
     // ---- 3.5) Descuento inmediato para productos sin preparación ----------

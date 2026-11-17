@@ -87,7 +87,7 @@ const {
   calcularInsumosDeLineas,
   registrarMovimientosInventario,
 } = require('../utils/inventarioOrden');
-const { tieneColumna } = require('../utils/esquema');
+const { tieneColumna, tieneTabla } = require('../utils/esquema');
 
 const router = express.Router();
 require('../utils/validarParametros').validarParametrosId(router);
@@ -179,10 +179,25 @@ router.get('/', requiereRol(...ROLES_QUE_VEN), async (req, res) => {
       });
     }
 
+    // Embalaje elegido para cada orden (2026-11-17): la cocina lo ve en la tarjeta.
+    const embalajePorOrden = {};
+    if (await tieneTabla('orden_embalajes')) {
+      const emb = await pool.query(
+        `SELECT oe.orden_id, oe.cantidad, i.nombre
+         FROM orden_embalajes oe JOIN insumos i ON i.id = oe.insumo_id
+         WHERE oe.orden_id = ANY($1::int[]) ORDER BY i.nombre`,
+        [ordenIds],
+      );
+      for (const f of emb.rows) {
+        (embalajePorOrden[f.orden_id] ||= []).push({ nombre: f.nombre, cantidad: Number(f.cantidad) });
+      }
+    }
+
     // Cada orden sale con su arreglo `items` incluido.
     const resultado = ordenes.rows.map((orden) => ({
       ...orden,
       items: detallePorOrden[orden.id] || [],
+      embalajes: embalajePorOrden[orden.id] || [],
     }));
 
     res.json(resultado);

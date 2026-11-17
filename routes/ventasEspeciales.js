@@ -56,6 +56,8 @@ const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { registrarAccion } = require('../utils/bitacora');
 const { fechaValida } = require('../utils/fecha');
+const { tieneTabla, tieneColumna } = require('../utils/esquema');
+const { validarEmbalajes } = require('../utils/embalajes');
 const { horaValida } = require('../utils/validar');
 
 const router = express.Router();
@@ -153,7 +155,52 @@ async function obtenerVentaEspecialCompleta(ejecutor, id) {
      ORDER BY d.id`,
     [id],
   );
-  return { ...cabecera.rows[0], items: items.rows };
+  let embalajes = [];
+  if (await tieneTabla('venta_especial_embalajes')) {
+    const e = await ejecutor.query(
+      `SELECT x.insumo_id, i.nombre, i.embalaje_clase AS clase, i.unidad_medida, x.cantidad::float8 AS cantidad
+       FROM venta_especial_embalajes x JOIN insumos i ON i.id = x.insumo_id
+       WHERE x.venta_especial_id = $1 ORDER BY i.embalaje_clase, i.nombre`,
+      [id],
+    );
+    embalajes = e.rows;
+  }
+  return { ...cabecera.rows[0], items: items.rows, embalajes };
+}
+
+// Guarda el embalaje y las decoraciones de una cotización (reemplaza todo lo anterior).
+async function guardarEmbalajes(client, ventaEspecialId, lista) {
+  if (!(await tieneTabla('venta_especial_embalajes'))) return;
+  await client.query('DELETE FROM venta_especial_embalajes WHERE venta_especial_id = $1', [ventaEspecialId]);
+  for (const e of lista) {
+    await client.query(
+      'INSERT INTO venta_especial_embalajes (venta_especial_id, insumo_id, cantidad) VALUES ($1, $2, $3)',
+      [ventaEspecialId, e.insumo_id, e.cantidad],
+    );
+  }
+}
+
+// Al marcarla "entregada" se descuenta del inventario el embalaje y la decoración usados (una sola
+// vez: embalaje_descontado). Una cotización por sí sola nunca mueve inventario.
+async function descontarEmbalajes(client, ventaEspecialId, usuarioId) {
+  if (!(await tieneColumna('ventas_especiales', 'embalaje_descontado'))) return;
+  if (!(await tieneTabla('venta_especial_embalajes'))) return;
+  const marca = await client.query('SELECT embalaje_descontado FROM ventas_especiales WHERE id = $1 FOR UPDATE', [
+    ventaEspecialId,
+  ]);
+  if (marca.rows[0]?.embalaje_descontado) return;
+  const usados = await client.query(
+    'SELECT insumo_id, cantidad FROM venta_especial_embalajes WHERE venta_especial_id = $1',
+    [ventaEspecialId],
+  );
+  for (const u of usados.rows) {
+    await client.query(
+      `INSERT INTO movimientos_inventario (insumo_id, tipo, cantidad, responsable_id, motivo)
+       VALUES ($1, 'salida', $2, $3, $4)`,
+      [u.insumo_id, u.cantidad, usuarioId, `Venta especial #${ventaEspecialId}: embalaje y decoración`],
+    );
+  }
+  await client.query('UPDATE ventas_especiales SET embalaje_descontado = TRUE WHERE id = $1', [ventaEspecialId]);
 }
 
 // GET /api/ventas-especiales?desde=&hasta=&estado=&buscar=
@@ -242,6 +289,7 @@ router.post('/', async (req, res) => {
     await client.query('BEGIN');
 
     const { itemsResueltos, subtotal } = await resolverItems(client, items);
+    const embalajesEsp = await validarEmbalajes(client, req.body.embalajes, 'especial');
 
     const cabecera = await client.query(
       `INSERT INTO ventas_especiales
@@ -270,6 +318,8 @@ router.post('/', async (req, res) => {
         [ventaEspecialId, item.variante_id, item.cantidad, item.precio_unitario, item.notas],
       );
     }
+
+    if (embalajesEsp.length > 0) await guardarEmbalajes(client, ventaEspecialId, embalajesEsp);
 
     await client.query('COMMIT');
     res.status(201).json(await obtenerVentaEspecialCompleta(client, ventaEspecialId));
@@ -349,6 +399,9 @@ router.patch('/:id', async (req, res) => {
       nuevoSubtotal = resuelto.subtotal;
     }
 
+    const embalajesEsp =
+      body.embalajes !== undefined ? await validarEmbalajes(client, body.embalajes, 'especial') : null;
+
     const nombre = body.cliente_nombre !== undefined ? body.cliente_nombre.trim() : actualFila.cliente_nombre;
     const telefono =
       body.cliente_telefono !== undefined ? body.cliente_telefono?.trim() || null : actualFila.cliente_telefono;
@@ -378,6 +431,11 @@ router.patch('/:id', async (req, res) => {
           [id, item.variante_id, item.cantidad, item.precio_unitario, item.notas],
         );
       }
+    }
+
+    if (embalajesEsp) await guardarEmbalajes(client, id, embalajesEsp);
+    if (estado === 'entregada' && actualFila.estado !== 'entregada') {
+      await descontarEmbalajes(client, id, req.usuario.id);
     }
 
     await client.query('COMMIT');

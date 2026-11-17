@@ -41,6 +41,7 @@ const express = require('express');
 const pool = require('../db');
 const { verificarToken, requiereRol } = require('../middleware/auth');
 const { EXPRESION_EXISTENCIA } = require('../utils/existencia');
+const { embalajesDisponibles } = require('../utils/embalajes');
 const { registrarAccion } = require('../utils/bitacora');
 const { diaNegocioSql, fechaValida, fechaHoyNegocio } = require('../utils/fecha');
 
@@ -82,6 +83,8 @@ router.use(requiereRol('administrador', 'encargado'));
 // ya hay algo que de verdad se reinterpretaría.
 router.get('/', async (req, res) => {
   try {
+    // Los embalajes (2026-11-17) tienen su propia pantalla; no se mezclan con los insumos de cocina.
+    const sinEmbalajes = (await embalajesDisponibles()) ? 'WHERE i.embalaje_uso IS NULL' : '';
     const resultado = await pool.query(
       `SELECT i.id, i.nombre, i.unidad_medida, i.cantidad_minima, i.proveedor_id,
               p.nombre AS proveedor, i.categoria_id, c.nombre AS categoria,
@@ -95,6 +98,7 @@ router.get('/', async (req, res) => {
        LEFT JOIN proveedores p ON p.id = i.proveedor_id
        LEFT JOIN categorias_insumo c ON c.id = i.categoria_id
        LEFT JOIN movimientos_inventario m ON m.insumo_id = i.id
+       ${sinEmbalajes}
        GROUP BY i.id, p.nombre, c.nombre
        ORDER BY i.nombre`,
     );
